@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static Linux binaries — ideal for containers
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          # macOS — native runners for each arch
+          - target: x86_64-apple-darwin
+            os: macos-13          # Intel
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest      # Apple Silicon (macos-14+)
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build \
+            --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          tag=${{ github.ref_name }}
+          target=${{ matrix.target }}
+          asset=fling-${tag}-${target}.tar.gz
+          tar -czf "${asset}" \
+            -C target/${target}/release fling
+          sha256sum "${asset}" > "${asset}.sha256"
+          echo "ASSET=${asset}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Combined checksums
+        run: cat artifacts/*.sha256 | sort > checksums.sha256
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            artifacts/*
+            checksums.sha256
+          generate_release_notes: true
