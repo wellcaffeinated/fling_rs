@@ -37,14 +37,19 @@ pub fn build_command(entry: &CommandConfig, args: &[String]) -> Command {
 fn build_sandboxed(entry: &CommandConfig, sandbox: &Sandbox, args: &[String]) -> Command {
     let mut cmd = Command::new("bwrap");
 
-    // Minimal runtime image: libraries needed to load the executable, a private
-    // /proc, /dev and /tmp, and nothing writable from the host by default.
+    // Minimal runtime image: libraries needed to load the executable, an
+    // optional private /proc and /dev, a fresh /tmp, and nothing writable from
+    // the host by default.
     cmd.args(["--ro-bind", "/usr", "/usr"]);
     for dir in RUNTIME_DIRS {
         cmd.args(["--ro-bind-try", dir, dir]);
     }
-    cmd.args(["--proc", "/proc"]);
-    cmd.args(["--dev", "/dev"]);
+    if sandbox.proc {
+        cmd.args(["--proc", "/proc"]);
+    }
+    if sandbox.dev {
+        cmd.args(["--dev", "/dev"]);
+    }
     cmd.args(["--tmpfs", "/tmp"]);
 
     // Isolate namespaces (incl. network), reap on parent death, and detach the
@@ -121,6 +126,33 @@ mod tests {
         assert_eq!(&argv[sep + 1..], &["/bin/cat", "/data/public/file"]);
         // Network and other namespaces are isolated.
         assert!(argv.iter().any(|a| a == "--unshare-all"));
+    }
+
+    #[test]
+    fn proc_and_dev_default_on_but_can_be_disabled() {
+        let on = r#"
+            [commands.a]
+            executable = "/bin/cat"
+            allow = ["*"]
+            [commands.a.sandbox]
+            ro_bind = ["/data"]
+        "#;
+        let argv = cmd_for(on, "a", &[]);
+        assert!(window_contains(&argv, &["--proc", "/proc"]));
+        assert!(window_contains(&argv, &["--dev", "/dev"]));
+
+        let off = r#"
+            [commands.a]
+            executable = "/bin/cat"
+            allow = ["*"]
+            [commands.a.sandbox]
+            ro_bind = ["/data"]
+            proc = false
+            dev = false
+        "#;
+        let argv = cmd_for(off, "a", &[]);
+        assert!(!window_contains(&argv, &["--proc", "/proc"]));
+        assert!(!window_contains(&argv, &["--dev", "/dev"]));
     }
 
     fn window_contains(haystack: &[String], needle: &[&str]) -> bool {

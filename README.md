@@ -105,16 +105,32 @@ allow      = ["*"]
 [commands.cat.sandbox]
 ro_bind = ["/srv/share"]      # read-only paths
 rw_bind = ["/srv/uploads"]    # read-write paths (optional)
+proc    = true                # mount a private /proc (default true)
+dev     = true                # mount a minimal /dev  (default true)
 ```
 
 `cat /srv/share/notes.txt` works; `cat /etc/passwd` fails with *No such file* —
 the file isn't in the sandbox at all, independent of the glob rules. Each
 sandboxed command runs in fresh mount/pid/user/network namespaces with only
-`/usr`, the runtime libraries, a private `/proc`, `/dev` and `/tmp`, plus the
-bound paths.
+`/usr`, the runtime libraries, a fresh `/tmp`, optionally `/proc` and `/dev`,
+plus the bound paths. Set `proc = false` / `dev = false` for commands that don't
+need them (e.g. `cat`).
 
-Requires `bwrap` on the server's `PATH` and a kernel with unprivileged user
-namespaces enabled (`kernel.unprivileged_userns_clone=1`). Commands without a
+### Does this need root?
+
+No. bubblewrap is built for exactly this — **an unprivileged user can sandbox
+commands with no setuid, no capabilities, no root.** On any modern host with
+unprivileged user namespaces enabled (the default on Debian, Ubuntu, Arch and
+Fedora; check with `sysctl kernel.unprivileged_userns_clone` or
+`/proc/sys/user/max_user_namespaces`), running the fling server as a normal user
+is all you need. Just make sure `bwrap` is on its `PATH`.
+
+The one place it gets fiddly is running bwrap *nested inside another sandbox*
+that restricts the namespace syscalls — most notably a default-configured Docker
+container, whose seccomp profile blocks `unshare`/`clone` with `CLONE_NEWUSER`,
+and whose masked `/proc` blocks mounting a fresh procfs. That's a property of
+the outer container, not of fling. See the smoke-test notes below for how the
+compose file handles it without going privileged. Commands without a
 `[*.sandbox]` section run unsandboxed as before.
 
 ## Protocol
@@ -156,5 +172,8 @@ The client container drives symlinked commands (`foo`, `relaycat`, `safecat`,
 `safecat` can read its bound directory but not `/etc/passwd`. It exits 0 when
 every check passes. Tear down with `docker compose -f docker/compose.yml down -v`.
 
-(The compose file runs the server container `privileged` only because bubblewrap
-nests namespaces inside Docker here; a normal host needs no extra privileges.)
+The compose file gives the server container `security_opt: [seccomp=unconfined]`
+— *not* `privileged` — which is the minimal grant that lets bubblewrap create
+namespaces inside Docker (no extra capabilities, no device access). The demo's
+`safecat` also sets `proc = false`, since Docker's masked `/proc` blocks mounting
+a fresh procfs unprivileged. On a normal host neither tweak is needed.

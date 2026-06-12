@@ -23,5 +23,10 @@ allow = ["*"]
 
 [commands.safecat.sandbox]
 ro_bind = ["/data/public"]
+# cat needs neither /proc nor /dev. Disabling /proc lets the sandbox run
+# unprivileged inside Docker (mounting a fresh /proc is blocked by Docker's
+# masked /proc); on a normal host the default `proc = true` works fine.
+proc = false
+dev = false
 
 # Note: `bar` is intentionally NOT configured, so relaying it is denied.

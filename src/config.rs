@@ -30,6 +30,18 @@ pub struct Sandbox {
     /// Paths bind-mounted read-write into the sandbox.
     #[serde(default)]
     pub rw_bind: Vec<String>,
+    /// Mount a fresh private `/proc` (default true). Disable for commands that
+    /// don't need it; mounting a fresh procfs requires privileges that some
+    /// nested/locked-down environments (e.g. Docker's masked `/proc`) withhold.
+    #[serde(default = "default_true")]
+    pub proc: bool,
+    /// Mount a minimal `/dev` with the standard device nodes (default true).
+    #[serde(default = "default_true")]
+    pub dev: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl CommandConfig {

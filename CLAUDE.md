@@ -37,9 +37,9 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 ## Sandboxing
 
-- A command with a `[commands.<name>.sandbox]` section (`ro_bind` / `rw_bind` lists) is spawned via `bwrap` — see `src/sandbox.rs`. Only `/usr`, runtime lib dirs, a private `/proc`, `/dev`, `/tmp`, and the bound paths are visible; namespaces (incl. network) are unshared.
+- A command with a `[commands.<name>.sandbox]` section (`ro_bind`/`rw_bind` lists, plus `proc`/`dev` bools that default true) is spawned via `bwrap` — see `src/sandbox.rs`. Only `/usr`, runtime lib dirs, `/tmp`, optionally `/proc`+`/dev`, and the bound paths are visible; namespaces (incl. network) are unshared.
 - This is how a relayed `cat` is confined to a directory: the unbound files don't exist in the sandbox, independent of the glob rules.
-- Requires `bwrap` on PATH and unprivileged user namespaces. The docker smoke test runs the server `privileged` only because it nests namespaces inside Docker.
+- **No root needed**: bwrap sandboxes unprivileged on any host with unprivileged user namespaces enabled (the distro default). The fiddly cases are nesting inside another restricted sandbox: Docker's default seccomp blocks the `CLONE_NEWUSER` syscalls and its masked `/proc` blocks a fresh procfs mount. Hence the smoke test uses `security_opt: [seccomp=unconfined]` (not `privileged`) and `proc = false` on the demo command — both only needed because of the outer Docker container.
 
 ## Protocol invariants
 
