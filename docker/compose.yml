@@ -1,0 +1,31 @@
+# Two-container smoke test: a server container exposes the relay over a shared
+# Unix socket, and a client container drives it through symlinked commands.
+#
+#   docker compose -f docker/compose.yml up --build --abort-on-container-exit \
+#       --exit-code-from client
+#
+# The client exits 0 when every access-rule assertion passes.
+name: fling-smoke
+
+services:
+  server:
+    image: fling-smoke
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["fling", "server", "--socket", "unix:/run/fling/fling.sock", "--config", "/etc/fling/config.toml"]
+    volumes:
+      - sock:/run/fling
+
+  client:
+    image: fling-smoke
+    depends_on:
+      - server
+    environment:
+      FLING_SOCKET: "unix:/run/fling/fling.sock"
+    volumes:
+      - sock:/run/fling
+    command: ["/usr/local/bin/smoke.sh"]
+
+volumes:
+  sock:

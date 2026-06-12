@@ -18,13 +18,22 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 | File | Role |
 |---|---|
-| `src/main.rs` | Entry point. Detects implicit client mode by inspecting `argv[1]` before clap parsing. |
-| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. |
-| `src/config.rs` | TOML config loading. Read once at server startup, then wrapped in `Arc<Config>`. |
+| `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
+| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling.sock`. |
+| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Read once at server startup, then wrapped in `Arc<Config>`. |
+| `src/glob.rs` | Minimal `*`/`?` glob matcher (`glob_match`) used by the access rules. |
 | `src/protocol.rs` | Wire format: `read_frame`/`write_frame` for binary frames, `read_json_line`/`write_json_line` for the handshake. |
 | `src/server.rs` | Accept loop + per-connection handler. Each connection spawns 4 tasks (A: stdin relay, B: stdout, C: stderr, D: socket writer). |
 | `src/client.rs` | Connects, sends request, relays stdin (task), receives output frames (task). |
-| `tests/integration.rs` | Integration tests. Each test starts a real server subprocess and exercises the full binary. |
+| `tests/integration.rs` | Integration tests. Each test starts a real server subprocess and exercises the full binary. `start_with_rules` sets per-command allow globs. |
+| `docker/` | Two-container smoke test (`compose.yml`, `Dockerfile`, `config.toml`, `smoke.sh`). |
+
+## Access-rule model
+
+- **Default-deny**: a request is authorized only if `config.commands` contains the command name *and* one of that command's `allow` globs matches the space-joined arguments. See `Config::authorize`.
+- **Patterns match args only** — the command name is implied by the config key. `allow = ["*"]` permits any arguments; an absent/empty `allow` denies everything.
+- Glob is `*` (any run, incl. spaces and `/`) and `?` (one char) — see `src/glob.rs`. No regex, no char classes.
+- Denials are returned in the handshake `ServerAck{ok:false, error}`; the client prints `fling: <error>` and exits 1.
 
 ## Protocol invariants
 

@@ -33,14 +33,12 @@ async fn handle_connection(stream: tokio::net::UnixStream, config: Arc<Config>) 
     // Handshake: read request
     let request: protocol::ClientRequest = protocol::read_json_line(&mut read_half).await?;
 
-    // Check allowlist
-    let entry = match config.commands.get(&request.cmd) {
-        Some(e) => e.clone(),
-        None => {
-            let ack = ServerAck {
-                ok: false,
-                error: Some(format!("command '{}' is not in the allowlist", request.cmd)),
-            };
+    // Authorize under the default-deny access rules (command must be configured
+    // and its arguments must match an allow glob).
+    let entry = match config.authorize(&request.cmd, &request.args) {
+        Ok(e) => e.clone(),
+        Err(msg) => {
+            let ack = ServerAck { ok: false, error: Some(msg) };
             protocol::write_json_line(&mut write_half, &ack).await?;
             return Ok(());
         }
