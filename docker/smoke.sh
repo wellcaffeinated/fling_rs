@@ -31,9 +31,9 @@ else
     bad "foo list everything (rc=$rc out='$out')"
 fi
 
-# 2. Disallowed subcommand denied by the glob rules.
+# 2. Disallowed subcommand denied by the glob rules, with the uniform message.
 err=$(foo create thing 2>&1 >/dev/null); rc=$?
-if [ "$rc" -ne 0 ] && echo "$err" | grep -q "not permitted"; then
+if [ "$rc" -ne 0 ] && [ "$err" = "You are not authorized to execute this command" ]; then
     pass "foo create thing denied (rc=$rc)"
 else
     bad "foo create thing should be denied (rc=$rc err='$err')"
@@ -47,12 +47,38 @@ else
     bad "relaycat stdin relay (rc=$rc out='$out')"
 fi
 
-# 4. Unconfigured command (symlink exists, but no config entry) is denied.
+# 4. Unconfigured command (symlink exists, but no config entry) is denied with
+#    the same uniform message — the rules don't leak which commands exist.
 err=$(bar anything 2>&1 >/dev/null); rc=$?
-if [ "$rc" -ne 0 ] && echo "$err" | grep -q "not configured"; then
+if [ "$rc" -ne 0 ] && [ "$err" = "You are not authorized to execute this command" ]; then
     pass "bar anything denied (rc=$rc)"
 else
     bad "bar anything should be denied (rc=$rc err='$err')"
+fi
+
+# 5. Sandboxed command can read a file inside its bound directory.
+out=$(safecat /data/public/hello.txt); rc=$?
+if [ "$rc" -eq 0 ] && [ "$out" = "public data" ]; then
+    pass "safecat reads bound /data/public (-> '$out')"
+else
+    bad "safecat should read /data/public/hello.txt (rc=$rc out='$out')"
+fi
+
+# 6. Sandbox blocks files outside the bound directory, even though the glob
+#    rule (`*`) would permit the argument. /etc/passwd is simply not present.
+out=$(safecat /etc/passwd 2>/dev/null); rc=$?
+if [ "$rc" -ne 0 ] && [ -z "$out" ]; then
+    pass "safecat cannot see /etc/passwd (rc=$rc)"
+else
+    bad "safecat should NOT read /etc/passwd (rc=$rc out='$out')"
+fi
+
+# 7. ... and likewise for a sibling file under the unbound /data parent.
+out=$(safecat /data/secret.txt 2>/dev/null); rc=$?
+if [ "$rc" -ne 0 ] && [ -z "$out" ]; then
+    pass "safecat cannot see /data/secret.txt (rc=$rc)"
+else
+    bad "safecat should NOT read /data/secret.txt (rc=$rc out='$out')"
 fi
 
 if [ "$fail" -eq 0 ]; then

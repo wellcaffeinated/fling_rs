@@ -14,4 +14,14 @@ allow = ["list*", "status"]
 executable = "/bin/cat"
 allow = ["*"]
 
+# `safecat` relays cat inside a bubblewrap sandbox that exposes ONLY
+# /data/public. Even though any path argument is allowed by the glob rule,
+# the command physically cannot see files outside the bound directory.
+[commands.safecat]
+executable = "/bin/cat"
+allow = ["*"]
+
+[commands.safecat.sandbox]
+ro_bind = ["/data/public"]
+
 # Note: `bar` is intentionally NOT configured, so relaying it is denied.

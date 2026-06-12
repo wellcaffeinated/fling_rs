@@ -1,8 +1,8 @@
 mod cli;
 mod client;
 mod config;
-mod glob;
 mod protocol;
+mod sandbox;
 mod server;
 
 use std::path::Path;

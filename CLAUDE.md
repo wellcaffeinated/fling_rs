@@ -20,8 +20,8 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 |---|---|
 | `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
 | `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling.sock`. |
-| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Read once at server startup, then wrapped in `Arc<Config>`. |
-| `src/glob.rs` | Minimal `*`/`?` glob matcher (`glob_match`) used by the access rules. |
+| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Read once at startup, wrapped in `Arc<Config>`. |
+| `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` when the command has a `[*.sandbox]` section. |
 | `src/protocol.rs` | Wire format: `read_frame`/`write_frame` for binary frames, `read_json_line`/`write_json_line` for the handshake. |
 | `src/server.rs` | Accept loop + per-connection handler. Each connection spawns 4 tasks (A: stdin relay, B: stdout, C: stderr, D: socket writer). |
 | `src/client.rs` | Connects, sends request, relays stdin (task), receives output frames (task). |
@@ -32,8 +32,14 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 - **Default-deny**: a request is authorized only if `config.commands` contains the command name *and* one of that command's `allow` globs matches the space-joined arguments. See `Config::authorize`.
 - **Patterns match args only** — the command name is implied by the config key. `allow = ["*"]` permits any arguments; an absent/empty `allow` denies everything.
-- Glob is `*` (any run, incl. spaces and `/`) and `?` (one char) — see `src/glob.rs`. No regex, no char classes.
-- Denials are returned in the handshake `ServerAck{ok:false, error}`; the client prints `fling: <error>` and exits 1.
+- Globs use the `globset` crate (`*`, `?`, `[...]`, `{a,b}`); `*` matches across `/` (literal_separator defaults off). Compiled at load.
+- **Uniform denial**: `Config::authorize` returns a detailed `Err` reason which the server logs to its own stderr (`fling: denied: …`), but the client only ever receives `"You are not authorized to execute this command"` via `ServerAck{ok:false}`. The client prints that message verbatim (no `fling:` prefix) and exits 1. Don't leak the specific reason to the client.
+
+## Sandboxing
+
+- A command with a `[commands.<name>.sandbox]` section (`ro_bind` / `rw_bind` lists) is spawned via `bwrap` — see `src/sandbox.rs`. Only `/usr`, runtime lib dirs, a private `/proc`, `/dev`, `/tmp`, and the bound paths are visible; namespaces (incl. network) are unshared.
+- This is how a relayed `cat` is confined to a directory: the unbound files don't exist in the sandbox, independent of the glob rules.
+- Requires `bwrap` on PATH and unprivileged user namespaces. The docker smoke test runs the server `privileged` only because it nests namespaces inside Docker.
 
 ## Protocol invariants
 
@@ -61,6 +67,6 @@ Tasks B and C drop their `tx` clones when done; Task D exits when the channel dr
 ## Common pitfalls
 
 - **Don't check socket file existence for readiness** — use an actual connect attempt (see `TestServer::start`).
-- **`std::process::exit` in client main** — intentional, propagates the remote exit code exactly. Don't replace with `?` propagation.
+- **`std::process::exit` in client main** — intentional, propagates the remote exit code exactly. Don't replace with `?` propagation. **But** because `process::exit` does *not* flush, the client's output task must `flush()` tokio stdout/stderr before returning, or relayed output is intermittently truncated (was a real, load-dependent bug).
 - **Stale socket files** — server calls `remove_file` at startup. If the server crashes without cleanup, restart removes it automatically.
 - **Edition 2024** — this project uses Rust 2024 edition (requires rustc ≥ 1.85).

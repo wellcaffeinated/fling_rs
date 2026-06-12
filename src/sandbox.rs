@@ -1,0 +1,129 @@
+//! Builds the child process for a relayed command, optionally wrapping it in a
+//! `bwrap` (bubblewrap) sandbox that restricts the command's filesystem view.
+//!
+//! When a command has a `[commands.<name>.sandbox]` section, the executable is
+//! launched inside a fresh mount/user/pid/net namespace where only the runtime
+//! libraries and the explicitly bound paths are visible. This is how, e.g., a
+//! relayed `cat` can be restricted to a single directory: bind that directory
+//! read-only and nothing else (so `/etc/passwd` simply isn't present).
+
+use tokio::process::Command;
+
+use crate::config::{CommandConfig, Sandbox};
+
+/// Directories bound read-only into every sandbox so the executable and its
+/// shared libraries resolve. `--ro-bind-try` skips any that don't exist on the
+/// host (e.g. `/lib64` on some distros).
+const RUNTIME_DIRS: &[&str] = &["/lib", "/lib64", "/bin", "/sbin"];
+
+/// Build the [`Command`] to spawn for `entry` with `args`.
+///
+/// Stdio configuration is left to the caller; only the program, arguments,
+/// working directory and (if configured) sandbox wrapping are set here.
+pub fn build_command(entry: &CommandConfig, args: &[String]) -> Command {
+    match &entry.sandbox {
+        None => {
+            let mut cmd = Command::new(&entry.executable);
+            cmd.args(args);
+            if let Some(wd) = &entry.working_dir {
+                cmd.current_dir(wd);
+            }
+            cmd
+        }
+        Some(sandbox) => build_sandboxed(entry, sandbox, args),
+    }
+}
+
+fn build_sandboxed(entry: &CommandConfig, sandbox: &Sandbox, args: &[String]) -> Command {
+    let mut cmd = Command::new("bwrap");
+
+    // Minimal runtime image: libraries needed to load the executable, a private
+    // /proc, /dev and /tmp, and nothing writable from the host by default.
+    cmd.args(["--ro-bind", "/usr", "/usr"]);
+    for dir in RUNTIME_DIRS {
+        cmd.args(["--ro-bind-try", dir, dir]);
+    }
+    cmd.args(["--proc", "/proc"]);
+    cmd.args(["--dev", "/dev"]);
+    cmd.args(["--tmpfs", "/tmp"]);
+
+    // Isolate namespaces (incl. network), reap on parent death, and detach the
+    // controlling terminal to block TIOCSTI-style input injection.
+    cmd.arg("--unshare-all");
+    cmd.arg("--die-with-parent");
+    cmd.arg("--new-session");
+
+    // Explicitly granted paths.
+    for path in &sandbox.ro_bind {
+        cmd.args(["--ro-bind", path, path]);
+    }
+    for path in &sandbox.rw_bind {
+        cmd.args(["--bind", path, path]);
+    }
+
+    if let Some(wd) = &entry.working_dir {
+        cmd.args(["--chdir", wd]);
+    }
+
+    // End of bwrap options; the relayed command follows.
+    cmd.arg("--");
+    cmd.arg(&entry.executable);
+    cmd.args(args);
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use std::ffi::OsStr;
+
+    fn cmd_for(toml: &str, name: &str, args: &[&str]) -> Vec<String> {
+        let cfg = config::parse_for_test(toml);
+        let entry = cfg.commands.get(name).unwrap();
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let cmd = build_command(entry, &owned);
+        let std = cmd.as_std();
+        std::iter::once(std.get_program())
+            .chain(std.get_args())
+            .map(|a: &OsStr| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn no_sandbox_runs_executable_directly() {
+        let toml = r#"
+            [commands.echo]
+            executable = "/bin/echo"
+            allow = ["*"]
+        "#;
+        let argv = cmd_for(toml, "echo", &["hi"]);
+        assert_eq!(argv, vec!["/bin/echo", "hi"]);
+    }
+
+    #[test]
+    fn sandbox_wraps_in_bwrap_with_binds() {
+        let toml = r#"
+            [commands.cat]
+            executable = "/bin/cat"
+            allow = ["*"]
+            [commands.cat.sandbox]
+            ro_bind = ["/data/public"]
+            rw_bind = ["/data/scratch"]
+        "#;
+        let argv = cmd_for(toml, "cat", &["/data/public/file"]);
+        assert_eq!(argv[0], "bwrap");
+        // Grants appear as bind pairs.
+        assert!(window_contains(&argv, &["--ro-bind", "/data/public", "/data/public"]));
+        assert!(window_contains(&argv, &["--bind", "/data/scratch", "/data/scratch"]));
+        // The relayed command follows the `--` separator.
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        assert_eq!(&argv[sep + 1..], &["/bin/cat", "/data/public/file"]);
+        // Network and other namespaces are isolated.
+        assert!(argv.iter().any(|a| a == "--unshare-all"));
+    }
+
+    fn window_contains(haystack: &[String], needle: &[&str]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+}

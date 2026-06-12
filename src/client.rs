@@ -20,8 +20,12 @@ pub async fn run(socket_path: &str, cmd: &str, args: &[String]) -> Result<i32> {
 
     let ack: ServerAck = protocol::read_json_line(&mut read_half).await?;
     if !ack.ok {
-        let msg = ack.error.unwrap_or_else(|| "unknown server error".to_string());
-        eprintln!("fling: {msg}");
+        // The server's denial message is printed verbatim (no `fling:` prefix)
+        // so an access denial reads exactly as the configured policy text.
+        let msg = ack
+            .error
+            .unwrap_or_else(|| "You are not authorized to execute this command".to_string());
+        eprintln!("{msg}");
         return Ok(1);
     }
 
@@ -50,12 +54,12 @@ pub async fn run(socket_path: &str, cmd: &str, args: &[String]) -> Result<i32> {
         let mut stdout = tokio::io::stdout();
         let mut stderr = tokio::io::stderr();
 
-        loop {
+        let code = loop {
             let (channel, payload) = match protocol::read_frame(&mut read_half).await {
                 Ok(f) => f,
                 Err(_) => {
-                    eprintln!("fling: connection closed unexpectedly");
-                    return 1i32;
+                    let _ = stderr.write_all(b"fling: connection closed unexpectedly\n").await;
+                    break 1i32;
                 }
             };
 
@@ -67,18 +71,28 @@ pub async fn run(socket_path: &str, cmd: &str, args: &[String]) -> Result<i32> {
                     let _ = stderr.write_all(&payload).await;
                 }
                 CH_EXIT => {
-                    if payload.len() >= 4 {
-                        return i32::from_be_bytes(payload[..4].try_into().unwrap());
-                    }
-                    return 0;
+                    break if payload.len() >= 4 {
+                        i32::from_be_bytes(payload[..4].try_into().unwrap())
+                    } else {
+                        0
+                    };
                 }
                 CH_ERROR => {
-                    eprintln!("fling: {}", String::from_utf8_lossy(&payload));
-                    return 1;
+                    let _ = stderr.write_all(b"fling: ").await;
+                    let _ = stderr.write_all(&payload).await;
+                    let _ = stderr.write_all(b"\n").await;
+                    break 1;
                 }
                 _ => {}
             }
-        }
+        };
+
+        // Flush before returning: the caller exits via `std::process::exit`,
+        // which does NOT flush tokio's internally buffered stdout/stderr, so
+        // relayed output would otherwise be intermittently truncated.
+        let _ = stdout.flush().await;
+        let _ = stderr.flush().await;
+        code
     });
 
     let exit_code = task_output.await?;

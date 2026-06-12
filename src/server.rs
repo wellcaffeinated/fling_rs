@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -34,11 +33,17 @@ async fn handle_connection(stream: tokio::net::UnixStream, config: Arc<Config>) 
     let request: protocol::ClientRequest = protocol::read_json_line(&mut read_half).await?;
 
     // Authorize under the default-deny access rules (command must be configured
-    // and its arguments must match an allow glob).
+    // and its arguments must match an allow glob). The detailed reason is logged
+    // server-side; the client only ever sees a uniform denial, so the rules
+    // don't leak which commands exist.
     let entry = match config.authorize(&request.cmd, &request.args) {
         Ok(e) => e.clone(),
-        Err(msg) => {
-            let ack = ServerAck { ok: false, error: Some(msg) };
+        Err(reason) => {
+            eprintln!("fling: denied: {reason}");
+            let ack = ServerAck {
+                ok: false,
+                error: Some("You are not authorized to execute this command".to_string()),
+            };
             protocol::write_json_line(&mut write_half, &ack).await?;
             return Ok(());
         }
@@ -46,12 +51,8 @@ async fn handle_connection(stream: tokio::net::UnixStream, config: Arc<Config>) 
 
     protocol::write_json_line(&mut write_half, &ServerAck { ok: true, error: None }).await?;
 
-    // Spawn subprocess
-    let mut cmd = Command::new(&entry.executable);
-    cmd.args(&request.args);
-    if let Some(wd) = &entry.working_dir {
-        cmd.current_dir(wd);
-    }
+    // Spawn subprocess (wrapped in a bwrap sandbox if the command configures one).
+    let mut cmd = crate::sandbox::build_command(&entry, &request.args);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

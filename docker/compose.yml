@@ -16,6 +16,11 @@ services:
     command: ["fling", "server", "--socket", "unix:/run/fling/fling.sock", "--config", "/etc/fling/config.toml"]
     volumes:
       - sock:/run/fling
+    # `privileged` is only needed here because bubblewrap creates user/mount
+    # namespaces from *inside* this container (nested). On a normal host with
+    # unprivileged user namespaces enabled (kernel.unprivileged_userns_clone=1),
+    # fling's sandboxing needs no extra privileges.
+    privileged: true
 
   client:
     image: fling-smoke

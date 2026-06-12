@@ -74,16 +74,48 @@ allow      = ["*"]                 # any arguments permitted
 ```
 
 Each pattern is matched against the **space-joined arguments** (the command
-name itself is implied by the entry). Wildcards:
+name itself is implied by the entry), using the [`globset`](https://docs.rs/globset)
+crate — so `*`, `?`, `[a-z]` character classes and `{a,b}` alternation all work.
+`*` matches across any character, including spaces and `/`. Patterns are
+compiled and validated when the server starts, so a malformed glob fails fast.
 
-| Token | Matches |
-|---|---|
-| `*` | any run of characters, including spaces and `/` |
-| `?` | exactly one character |
+A command with no `allow` patterns (or an unknown command name) is rejected. The
+client prints exactly:
 
-A command with no `allow` patterns (or an unknown command name) is rejected with
-an error and exit code 1. So `obsidian create` would be denied above, while
-`obsidian --vault notes` is allowed.
+```
+You are not authorized to execute this command
+```
+
+and exits 1. The same message is used whether the command is unknown or merely
+its arguments are disallowed, so the rules don't reveal which commands exist;
+the server logs the specific reason to its own stderr. So `obsidian create`
+would be denied above, while `obsidian --vault notes` is allowed.
+
+## Filesystem sandboxing (optional)
+
+A command can be confined with [bubblewrap](https://github.com/containers/bubblewrap)
+(`bwrap`) so it only sees an explicit set of paths. This is how you restrict,
+say, a relayed `cat` to one directory:
+
+```toml
+[commands.cat]
+executable = "/bin/cat"
+allow      = ["*"]
+
+[commands.cat.sandbox]
+ro_bind = ["/srv/share"]      # read-only paths
+rw_bind = ["/srv/uploads"]    # read-write paths (optional)
+```
+
+`cat /srv/share/notes.txt` works; `cat /etc/passwd` fails with *No such file* —
+the file isn't in the sandbox at all, independent of the glob rules. Each
+sandboxed command runs in fresh mount/pid/user/network namespaces with only
+`/usr`, the runtime libraries, a private `/proc`, `/dev` and `/tmp`, plus the
+bound paths.
+
+Requires `bwrap` on the server's `PATH` and a kernel with unprivileged user
+namespaces enabled (`kernel.unprivileged_userns_clone=1`). Commands without a
+`[*.sandbox]` section run unsandboxed as before.
 
 ## Protocol
 
@@ -119,6 +151,10 @@ docker compose -f docker/compose.yml up --build \
     --abort-on-container-exit --exit-code-from client
 ```
 
-The client container drives symlinked commands (`foo`, `relaycat`, `bar`) and
-asserts the access rules hold; it exits 0 when every check passes. Tear down
-with `docker compose -f docker/compose.yml down -v`.
+The client container drives symlinked commands (`foo`, `relaycat`, `safecat`,
+`bar`) and asserts the access rules hold — including that the sandboxed
+`safecat` can read its bound directory but not `/etc/passwd`. It exits 0 when
+every check passes. Tear down with `docker compose -f docker/compose.yml down -v`.
+
+(The compose file runs the server container `privileged` only because bubblewrap
+nests namespaces inside Docker here; a normal host needs no extra privileges.)

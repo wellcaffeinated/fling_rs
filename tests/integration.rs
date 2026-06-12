@@ -123,7 +123,8 @@ fn disallowed_command_rejected() {
     assert!(!out.status.success());
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("not configured"), "unexpected stderr: {stderr}");
+    // Unknown commands and disallowed args share one uniform denial message.
+    assert_eq!(stderr, "You are not authorized to execute this command\n");
 }
 
 #[test]
@@ -141,7 +142,7 @@ fn glob_rules_allow_and_deny_subcommands() {
     let denied = s.run(&["foo", "create", "thing"]);
     assert_eq!(denied.status.code(), Some(1));
     let stderr = String::from_utf8(denied.stderr).unwrap();
-    assert!(stderr.contains("not permitted"), "unexpected stderr: {stderr}");
+    assert_eq!(stderr, "You are not authorized to execute this command\n");
 
     // Exact-match pattern: `status` alone is allowed, with extra args is not.
     assert!(s.run(&["foo", "status"]).status.success());
@@ -189,7 +190,10 @@ fn symlink_invocation_respects_access_rules() {
         .output()
         .unwrap();
     assert_eq!(denied.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&denied.stderr).contains("not permitted"));
+    assert_eq!(
+        String::from_utf8_lossy(&denied.stderr),
+        "You are not authorized to execute this command\n"
+    );
 
     let _ = std::fs::remove_dir_all(&link_dir);
 }
