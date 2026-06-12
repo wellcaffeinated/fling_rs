@@ -26,12 +26,12 @@ cargo build --release
 ### Server
 
 ```sh
-fling server --socket unix:/run/fling.sock --config /etc/fling/config.toml
+fling server --socket unix:/run/fling/fling.sock --config /etc/fling/config.toml
 ```
 
 | Flag | Default | Description |
 |---|---|---|
-| `--socket` / `-s` | `unix:/run/fling.sock` | Socket path (`unix:/path` or bare path) |
+| `--socket` / `-s` | `unix:/run/fling/fling.sock` | Socket path (`unix:/path` or bare path) |
 | `--config` / `-c` | `/etc/fling/config.toml` | Config file |
 
 ### Client
@@ -41,17 +41,17 @@ There are three equivalent ways to relay a command, in order of preference:
 ```sh
 # 1. Symlinked by command name (socket from $FLING_SOCKET).
 ln -s /usr/local/bin/fling /usr/local/bin/obsidian
-FLING_SOCKET=unix:/run/fling.sock obsidian --vault notes
+FLING_SOCKET=unix:/run/fling/fling.sock obsidian --vault notes
 
 # 2. Explicit, with --socket (or $FLING_SOCKET).
-fling --socket unix:/run/fling.sock obsidian --vault notes
+fling --socket unix:/run/fling/fling.sock obsidian --vault notes
 
 # 3. Implicit client mode: anything that isn't `server`.
 fling obsidian --vault notes   # uses $FLING_SOCKET or the default socket
 ```
 
 `fling` without the `server` subcommand is always client mode. The socket
-defaults to `unix:/run/fling.sock` and can be set with `$FLING_SOCKET`.
+defaults to `unix:/run/fling/fling.sock` and can be set with `$FLING_SOCKET`.
 
 ## Config & access rules
 

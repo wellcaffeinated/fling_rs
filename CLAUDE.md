@@ -19,7 +19,7 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 | File | Role |
 |---|---|
 | `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
-| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling.sock`. |
+| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling/fling.sock`. |
 | `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Read once at startup, wrapped in `Arc<Config>`. |
 | `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` when the command has a `[*.sandbox]` section. |
 | `src/protocol.rs` | Wire format: `read_frame`/`write_frame` for binary frames, `read_json_line`/`write_json_line` for the handshake. |

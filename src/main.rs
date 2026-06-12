@@ -17,7 +17,7 @@ const PROGRAM_NAME: &str = "fling";
 
 /// Default socket used by symlink-mode invocations, overridable via the
 /// `FLING_SOCKET` environment variable.
-const DEFAULT_SOCKET: &str = "unix:/run/fling.sock";
+const DEFAULT_SOCKET: &str = "unix:/run/fling/fling.sock";
 
 fn parse_socket_path(s: &str) -> String {
     s.strip_prefix("unix:").unwrap_or(s).to_owned()
