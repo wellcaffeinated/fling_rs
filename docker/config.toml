@@ -1,0 +1,32 @@
+# fling server access rules for the docker smoke test.
+#
+# Policy is default-deny: a command must be listed here AND its arguments must
+# match one of the `allow` glob patterns. Patterns are matched against the
+# space-joined arguments; `*` matches any run of characters, `?` a single one.
+
+# `foo list ...` and `foo status` are permitted; `foo create ...` is not.
+[commands.foo]
+executable = "/bin/echo"
+allow = ["list*", "status"]
+
+# `relaycat` forwards stdin to cat, with any arguments allowed.
+[commands.relaycat]
+executable = "/bin/cat"
+allow = ["*"]
+
+# `safecat` relays cat inside a bubblewrap sandbox that exposes ONLY
+# /data/public. Even though any path argument is allowed by the glob rule,
+# the command physically cannot see files outside the bound directory.
+[commands.safecat]
+executable = "/bin/cat"
+allow = ["*"]
+
+[commands.safecat.sandbox]
+ro_bind = ["/data/public"]
+# cat needs neither /proc nor /dev. Disabling /proc lets the sandbox run
+# unprivileged inside Docker (mounting a fresh /proc is blocked by Docker's
+# masked /proc); on a normal host the default `proc = true` works fine.
+proc = false
+dev = false
+
+# Note: `bar` is intentionally NOT configured, so relaying it is denied.

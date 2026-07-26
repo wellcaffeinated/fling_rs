@@ -18,13 +18,28 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 | File | Role |
 |---|---|
-| `src/main.rs` | Entry point. Detects implicit client mode by inspecting `argv[1]` before clap parsing. |
-| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. |
-| `src/config.rs` | TOML config loading. Read once at server startup, then wrapped in `Arc<Config>`. |
+| `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
+| `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling/fling.sock`. |
+| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Read once at startup, wrapped in `Arc<Config>`. |
+| `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` when the command has a `[*.sandbox]` section. |
 | `src/protocol.rs` | Wire format: `read_frame`/`write_frame` for binary frames, `read_json_line`/`write_json_line` for the handshake. |
 | `src/server.rs` | Accept loop + per-connection handler. Each connection spawns 4 tasks (A: stdin relay, B: stdout, C: stderr, D: socket writer). |
 | `src/client.rs` | Connects, sends request, relays stdin (task), receives output frames (task). |
-| `tests/integration.rs` | Integration tests. Each test starts a real server subprocess and exercises the full binary. |
+| `tests/integration.rs` | Integration tests. Each test starts a real server subprocess and exercises the full binary. `start_with_rules` sets per-command allow globs. |
+| `docker/` | Two-container smoke test (`compose.yml`, `Dockerfile`, `config.toml`, `smoke.sh`). |
+
+## Access-rule model
+
+- **Default-deny**: a request is authorized only if `config.commands` contains the command name *and* one of that command's `allow` globs matches the space-joined arguments. See `Config::authorize`.
+- **Patterns match args only** — the command name is implied by the config key. `allow = ["*"]` permits any arguments; an absent/empty `allow` denies everything.
+- Globs use the `globset` crate (`*`, `?`, `[...]`, `{a,b}`); `*` matches across `/` (literal_separator defaults off). Compiled at load.
+- **Uniform denial**: `Config::authorize` returns a detailed `Err` reason which the server logs to its own stderr (`fling: denied: …`), but the client only ever receives `"You are not authorized to execute this command"` via `ServerAck{ok:false}`. The client prints that message verbatim (no `fling:` prefix) and exits 1. Don't leak the specific reason to the client.
+
+## Sandboxing
+
+- A command with a `[commands.<name>.sandbox]` section (`ro_bind`/`rw_bind` lists, plus `proc`/`dev` bools that default true) is spawned via `bwrap` — see `src/sandbox.rs`. Only `/usr`, runtime lib dirs, `/tmp`, optionally `/proc`+`/dev`, and the bound paths are visible; namespaces (incl. network) are unshared.
+- This is how a relayed `cat` is confined to a directory: the unbound files don't exist in the sandbox, independent of the glob rules.
+- **No root needed**: bwrap sandboxes unprivileged on any host with unprivileged user namespaces enabled (the distro default). The fiddly cases are nesting inside another restricted sandbox: Docker's default seccomp blocks the `CLONE_NEWUSER` syscalls and its masked `/proc` blocks a fresh procfs mount. Hence the smoke test uses `security_opt: [seccomp=unconfined]` (not `privileged`) and `proc = false` on the demo command — both only needed because of the outer Docker container.
 
 ## Protocol invariants
 
@@ -52,6 +67,6 @@ Tasks B and C drop their `tx` clones when done; Task D exits when the channel dr
 ## Common pitfalls
 
 - **Don't check socket file existence for readiness** — use an actual connect attempt (see `TestServer::start`).
-- **`std::process::exit` in client main** — intentional, propagates the remote exit code exactly. Don't replace with `?` propagation.
+- **`std::process::exit` in client main** — intentional, propagates the remote exit code exactly. Don't replace with `?` propagation. **But** because `process::exit` does *not* flush, the client's output task must `flush()` tokio stdout/stderr before returning, or relayed output is intermittently truncated (was a real, load-dependent bug).
 - **Stale socket files** — server calls `remove_file` at startup. If the server crashes without cleanup, restart removes it automatically.
 - **Edition 2024** — this project uses Rust 2024 edition (requires rustc ≥ 1.85).

@@ -12,8 +12,8 @@ pub struct Cli {
 pub enum Commands {
     /// Run in server mode, listening on a Unix socket
     Server {
-        /// Socket path: unix:/run/fling.sock or /run/fling.sock
-        #[arg(long, short, default_value = "unix:/run/fling.sock")]
+        /// Socket path: unix:/run/fling/fling.sock or /run/fling/fling.sock
+        #[arg(long, short, default_value = "unix:/run/fling/fling.sock")]
         socket: String,
         /// Config file listing allowed commands
         #[arg(long, short, default_value = "/etc/fling/config.toml")]
@@ -21,10 +21,10 @@ pub enum Commands {
     },
     /// Relay a command through a Unix socket (default mode)
     Client {
-        /// Socket path: unix:/run/fling.sock or /run/fling.sock
-        #[arg(long, short)]
+        /// Socket path: unix:/run/fling/fling.sock or /run/fling/fling.sock
+        #[arg(long, short, env = "FLING_SOCKET", default_value = "unix:/run/fling/fling.sock")]
         socket: String,
-        /// Command name (must be in the server's allowlist)
+        /// Command name (must be permitted by the server's access rules)
         cmd: String,
         /// Arguments forwarded verbatim to the command
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

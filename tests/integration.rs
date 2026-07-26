@@ -15,13 +15,30 @@ struct TestServer {
 }
 
 impl TestServer {
+    /// Start a server allowing every argument for each command (`allow = ["*"]`).
     fn start(id: &str, commands: &[(&str, &str)]) -> Self {
+        let with_rules: Vec<_> = commands
+            .iter()
+            .map(|(name, exe)| (*name, *exe, &["*"][..]))
+            .collect();
+        Self::start_with_rules(id, &with_rules)
+    }
+
+    /// Start a server with explicit allow globs per command.
+    fn start_with_rules(id: &str, commands: &[(&str, &str, &[&str])]) -> Self {
         let socket = format!("/tmp/fling-test-{id}.sock");
         let config_path = format!("/tmp/fling-test-{id}.toml");
 
         let mut config = String::new();
-        for (name, exe) in commands {
-            config.push_str(&format!("[commands.{name}]\nexecutable = \"{exe}\"\n\n"));
+        for (name, exe, allow) in commands {
+            let patterns = allow
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            config.push_str(&format!(
+                "[commands.{name}]\nexecutable = \"{exe}\"\nallow = [{patterns}]\n\n"
+            ));
         }
         std::fs::write(&config_path, config).unwrap();
         let _ = std::fs::remove_file(&socket);
@@ -106,7 +123,79 @@ fn disallowed_command_rejected() {
     assert!(!out.status.success());
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("not in the allowlist"), "unexpected stderr: {stderr}");
+    // Unknown commands and disallowed args share one uniform denial message.
+    assert_eq!(stderr, "You are not authorized to execute this command\n");
+}
+
+#[test]
+fn glob_rules_allow_and_deny_subcommands() {
+    // `foo list ...` is permitted; `foo create ...` is not.
+    let s = TestServer::start_with_rules(
+        "glob-rules",
+        &[("foo", "/bin/echo", &["list*", "status"])],
+    );
+
+    let allowed = s.run(&["foo", "list", "everything"]);
+    assert!(allowed.status.success());
+    assert_eq!(String::from_utf8(allowed.stdout).unwrap(), "list everything\n");
+
+    let denied = s.run(&["foo", "create", "thing"]);
+    assert_eq!(denied.status.code(), Some(1));
+    let stderr = String::from_utf8(denied.stderr).unwrap();
+    assert_eq!(stderr, "You are not authorized to execute this command\n");
+
+    // Exact-match pattern: `status` alone is allowed, with extra args is not.
+    assert!(s.run(&["foo", "status"]).status.success());
+    assert_eq!(s.run(&["foo", "status", "--force"]).status.code(), Some(1));
+}
+
+#[test]
+fn symlink_invocation_relays_by_name() {
+    // The binary, symlinked as `greet`, should relay the command `greet`,
+    // taking the socket from FLING_SOCKET and forwarding all args verbatim.
+    let s = TestServer::start_with_rules("symlink", &[("greet", "/bin/echo", &["*"])]);
+
+    let link_dir = "/tmp/fling-test-symlink-bin".to_string();
+    let _ = std::fs::remove_dir_all(&link_dir);
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = format!("{link_dir}/greet");
+    std::os::unix::fs::symlink(FLING, &link).unwrap();
+
+    let out = Command::new(&link)
+        .args(["hello", "world"])
+        .env("FLING_SOCKET", format!("unix:{}", s.socket))
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "hello world\n");
+
+    let _ = std::fs::remove_dir_all(&link_dir);
+}
+
+#[test]
+fn symlink_invocation_respects_access_rules() {
+    // A symlinked command is still subject to the server's glob rules.
+    let s = TestServer::start_with_rules("symlink-deny", &[("tool", "/bin/echo", &["list*"])]);
+
+    let link_dir = "/tmp/fling-test-symlink-deny-bin".to_string();
+    let _ = std::fs::remove_dir_all(&link_dir);
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = format!("{link_dir}/tool");
+    std::os::unix::fs::symlink(FLING, &link).unwrap();
+
+    let denied = Command::new(&link)
+        .args(["delete", "everything"])
+        .env("FLING_SOCKET", format!("unix:{}", s.socket))
+        .output()
+        .unwrap();
+    assert_eq!(denied.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&denied.stderr),
+        "You are not authorized to execute this command\n"
+    );
+
+    let _ = std::fs::remove_dir_all(&link_dir);
 }
 
 #[test]

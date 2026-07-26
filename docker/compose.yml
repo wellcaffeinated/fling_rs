@@ -1,0 +1,39 @@
+# Two-container smoke test: a server container exposes the relay over a shared
+# Unix socket, and a client container drives it through symlinked commands.
+#
+#   docker compose -f docker/compose.yml up --build --abort-on-container-exit \
+#       --exit-code-from client
+#
+# The client exits 0 when every access-rule assertion passes.
+name: fling-smoke
+
+services:
+  server:
+    image: fling-smoke
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["fling", "server", "--socket", "unix:/run/fling/fling.sock", "--config", "/etc/fling/config.toml"]
+    volumes:
+      - sock:/run/fling
+    # bubblewrap creates user/mount namespaces from inside this container. The
+    # only extra grant it needs is relaxing Docker's default seccomp filter,
+    # which otherwise blocks the namespace syscalls (clone/unshare with
+    # CLONE_NEWUSER). This is far weaker than `privileged` — no extra
+    # capabilities, no device access. On a normal host with unprivileged user
+    # namespaces enabled, fling's sandboxing needs nothing at all.
+    security_opt:
+      - seccomp=unconfined
+
+  client:
+    image: fling-smoke
+    depends_on:
+      - server
+    environment:
+      FLING_SOCKET: "unix:/run/fling/fling.sock"
+    volumes:
+      - sock:/run/fling
+    command: ["/usr/local/bin/smoke.sh"]
+
+volumes:
+  sock:
