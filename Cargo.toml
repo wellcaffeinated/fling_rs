@@ -2,7 +2,9 @@
 name = "fling"
 version = "0.2.0"
 edition = "2024"
-publish = false
+# `publish` is deliberately left at its default. Setting `publish = false` here
+# makes release-plz skip the package entirely — no git tag, no release. Cargo
+# publishing is disabled in release-plz.toml instead.
 
 [dependencies]
 tokio      = { version = "1", features = ["full"] }

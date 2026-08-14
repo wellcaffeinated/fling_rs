@@ -1,2 +1,8 @@
 [workspace]
+# Determine released versions from git tags rather than the cargo registry,
+# since this crate is distributed as binaries and never published.
 git_only = true
+# Never run `cargo publish`. This must live here rather than in Cargo.toml:
+# `publish = false` in the manifest makes release-plz skip the package, so no
+# tag or release is ever created.
+publish = false
