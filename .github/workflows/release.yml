@@ -1,9 +1,19 @@
 name: Release
 
+# Two ways in:
+#   - a tag pushed by hand (`git push origin v1.2.3`)
+#   - called by the Release-plz workflow after it creates a tag, since tags
+#     pushed with GITHUB_TOKEN never trigger workflows on their own
 on:
   push:
     tags:
       - 'v[0-9]+.*'
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag to build from and attach binaries to.
+        type: string
+        required: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,6 +43,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          # When called by Release-plz the caller's ref is main, so the tag has
+          # to be checked out explicitly to build the code that was released.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -53,10 +67,11 @@ jobs:
 
       - name: Package
         shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag=${{ github.ref_name }}
           target=${{ matrix.target }}
-          asset=fling-${tag}-${target}.tar.gz
+          asset=fling-${TAG}-${target}.tar.gz
           tar -czf "${asset}" \
             -C target/${target}/release fling
           sha256sum "${asset}" > "${asset}.sha256"
@@ -85,9 +100,17 @@ jobs:
       - name: Combined checksums
         run: cat artifacts/*.sha256 | sort > checksums.sha256
 
-      - uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            artifacts/*
-            checksums.sha256
-          generate_release_notes: true
+      - name: Attach binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          # Release-plz has usually created the release already, with the
+          # changelog as its body — upload into it rather than replacing it.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* checksums.sha256 --clobber
+          else
+            gh release create "$TAG" --generate-notes \
+              artifacts/* checksums.sha256
+          fi

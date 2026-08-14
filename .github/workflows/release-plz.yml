@@ -13,6 +13,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      releases: ${{ steps.release.outputs.releases }}
     steps:
       - &checkout
         name: Checkout repository
@@ -24,11 +27,24 @@ jobs:
         name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # A tag pushed with GITHUB_TOKEN doesn't trigger the tag-driven Release
+  # workflow, so call it directly with the tag release-plz just created.
+  build-binaries:
+    name: Build binaries
+    needs: release-plz-release
+    if: needs.release-plz-release.outputs.releases_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ fromJSON(needs.release-plz-release.outputs.releases)[0].tag }}
 
   release-plz-pr:
     name: Release-plz PR
