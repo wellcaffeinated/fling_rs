@@ -18,11 +18,10 @@ use crate::config::{CommandConfig, Sandbox};
 /// host (e.g. `/lib64` on some distros).
 const RUNTIME_DIRS: &[&str] = &["/lib", "/lib64", "/bin", "/sbin"];
 
-/// Working directory for a sandboxed command that doesn't configure one: an
-/// empty directory created inside the sandbox, so relative paths resolve
-/// against nothing. It lives on the sandbox's own tmpfs and is discarded with
-/// the process. The name is deliberately unlikely to collide with a bind.
-const DEFAULT_SANDBOX_CWD: &str = "/fling-cwd";
+/// Working directory for a sandboxed command that doesn't configure one. The
+/// sandbox always mounts a fresh tmpfs here, so it starts empty, is writable
+/// for tools that expect a usable CWD, and is discarded with the process.
+const DEFAULT_SANDBOX_CWD: &str = "/tmp";
 
 /// Working directory for a command that has opted out of sandboxing and set no
 /// `working_dir`. Relayed commands must never inherit the server's own working
@@ -90,9 +89,9 @@ fn build_sandboxed(entry: &CommandConfig, sandbox: &Sandbox, args: &[String]) ->
             }
             cmd.args(["--chdir", wd]);
         }
-        // No working directory configured: start in an empty one.
+        // No working directory configured: start on the sandbox's own tmpfs,
+        // which is mounted above and contains nothing from the host.
         None => {
-            cmd.args(["--dir", DEFAULT_SANDBOX_CWD]);
             cmd.args(["--chdir", DEFAULT_SANDBOX_CWD]);
         }
     }

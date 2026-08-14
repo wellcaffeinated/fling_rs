@@ -60,7 +60,7 @@ Per-command config defaults:
 |---|---|---|
 | `allow` | *(empty)* | Denies every invocation |
 | `sandbox` | *(unset)* | **Sandboxed** with no paths granted — set `sandbox = false` to opt out |
-| `working_dir` | *(unset)* | Starts in an empty directory; nothing on the host is reachable by relative path |
+| `working_dir` | *(unset)* | Starts in the sandbox's own empty `/tmp`; nothing on the host is reachable by relative path |
 | `sandbox.ro_bind` / `rw_bind` | *(empty)* | No host paths visible beyond the runtime image |
 | `sandbox.proc` / `dev` | `true` | Private `/proc` and minimal `/dev` mounted |
 
@@ -106,7 +106,7 @@ The client prints exactly that and exits 1. The server logs the specific reason 
 
 ### Sandboxing
 
-**Every command is confined by default.** Commands run through [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in fresh mount/pid/user/network namespaces containing `/usr`, the runtime library directories, a fresh `/tmp`, `/proc` and `/dev` — and nothing else. A command with no `sandbox` section can read no host files at all, and starts in an empty working directory, so relative paths reach nothing either.
+**Every command is confined by default.** Commands run through [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in fresh mount/pid/user/network namespaces containing `/usr`, the runtime library directories, a fresh `/tmp`, `/proc` and `/dev` — and nothing else. A command with no `sandbox` section can read no host files at all, and starts in the sandbox's own `/tmp` — a fresh tmpfs, empty and writable, discarded when the command exits — so relative paths reach nothing on the host either. (A command with `sandbox = false` starts in `/` instead, since there the host's shared `/tmp` would be a poor default.)
 
 Granting access is explicit:
 
