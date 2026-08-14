@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Semaphore};
@@ -25,8 +26,23 @@ const MAX_CONNECTIONS: usize = 128;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 pub async fn run(socket_path: &str, config: Config) -> Result<()> {
+    if config.warn_missing_bwrap && config.uses_sandbox() && !crate::sandbox::bwrap_on_path() {
+        eprintln!(
+            "fling: WARNING: bwrap is not on PATH, but commands are configured to be \
+             sandboxed.\nfling: WARNING: those commands will FAIL until bubblewrap is \
+             installed.\nfling: WARNING: set `warn_missing_bwrap = false` to silence this."
+        );
+    }
+
+    // The socket's parent may not exist yet — /run/fling/ on a fresh install.
+    if let Some(parent) = Path::new(socket_path).parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create socket directory {}", parent.display()))?;
+    }
+
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
+    let listener = UnixListener::bind(socket_path)
+        .with_context(|| format!("failed to bind socket {socket_path}"))?;
     let config = Arc::new(config);
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     eprintln!("fling: listening on {socket_path}");
@@ -102,10 +118,11 @@ async fn handle_connection(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    let program = cmd.as_std().get_program().to_string_lossy().into_owned();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let msg = format!("failed to spawn '{}': {e}", entry.executable);
+            let msg = format!("failed to spawn '{program}': {e}");
             let mut frame = Vec::with_capacity(5 + msg.len());
             frame.push(CH_ERROR);
             frame.extend_from_slice(&(msg.len() as u32).to_be_bytes());

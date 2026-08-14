@@ -50,7 +50,7 @@ Anything that isn't `fling server` is client mode.
 | Client socket | `unix:/run/fling/fling.sock` | `--socket` > `$FLING_SOCKET` > default |
 | Config file | `/etc/fling/config.toml` | `--config` |
 
-Socket paths accept `unix:/path` or a bare `/path`. The socket's **parent directory must already exist** — the server does not create it. Under systemd, `RuntimeDirectory=fling` handles that.
+Socket paths accept `unix:/path` or a bare `/path`. The server creates the socket's parent directory if it doesn't exist.
 
 Symlink mode forwards every argument to the remote command, so it has no `--socket` flag; it reads `$FLING_SOCKET`, falling back to the default.
 
@@ -59,17 +59,23 @@ Per-command config defaults:
 | Key | Default | Effect |
 |---|---|---|
 | `allow` | *(empty)* | Denies every invocation |
-| `working_dir` | *(unset)* | Command inherits the **server process's** working directory |
-| `sandbox` | *(unset)* | No sandbox — the command sees the whole filesystem |
+| `sandbox` | *(unset)* | **Sandboxed** with no paths granted — set `sandbox = false` to opt out |
+| `working_dir` | *(unset)* | Starts in an empty directory; nothing on the host is reachable by relative path |
 | `sandbox.ro_bind` / `rw_bind` | *(empty)* | No host paths visible beyond the runtime image |
 | `sandbox.proc` / `dev` | `true` | Private `/proc` and minimal `/dev` mounted |
+
+Top-level settings:
+
+| Key | Default | Effect |
+|---|---|---|
+| `warn_missing_bwrap` | `true` | Warn loudly at startup if `bwrap` isn't on `PATH` while commands are sandboxed |
 
 ## Config
 
 ```toml
 [commands.mytool]
 executable  = "/opt/mytool/bin/mytool"
-working_dir = "/srv/work"           # optional
+working_dir = "/srv/work"           # optional; also grants access to it
 allow       = ["--flag *", "--version"]
 
 [commands.git]
@@ -100,7 +106,9 @@ The client prints exactly that and exits 1. The server logs the specific reason 
 
 ### Sandboxing
 
-A `[commands.<name>.sandbox]` section confines the command with [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) so it sees only the paths you bind:
+**Every command is confined by default.** Commands run through [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in fresh mount/pid/user/network namespaces containing `/usr`, the runtime library directories, a fresh `/tmp`, `/proc` and `/dev` — and nothing else. A command with no `sandbox` section can read no host files at all, and starts in an empty working directory, so relative paths reach nothing either.
+
+Granting access is explicit:
 
 ```toml
 [commands.cat]
@@ -114,7 +122,20 @@ proc    = false              # default true
 dev     = false              # default true
 ```
 
-`cat /srv/share/notes.txt` works; `cat /etc/passwd` fails with *No such file* — the file isn't in the sandbox at all, independent of the glob rules. Sandboxed commands get fresh mount/pid/user/network namespaces containing `/usr`, the runtime library directories, a fresh `/tmp`, optionally `/proc` and `/dev`, and the bound paths. Commands with no `sandbox` section are not confined.
+`cat /srv/share/notes.txt` works; `cat /etc/passwd` fails with *No such file* — the file isn't in the sandbox at all, independent of the glob rules.
+
+Setting `working_dir` is itself a grant: the directory is bound read-only into the sandbox (unless an existing bind already covers it) and becomes the command's CWD.
+
+To run a command unconfined, say so:
+
+```toml
+[commands.trusted]
+executable = "/usr/bin/tool"
+allow      = ["*"]
+sandbox    = false           # full filesystem access
+```
+
+`bwrap` must be on the server's `PATH`. If it isn't while commands are sandboxed, the server warns loudly at startup and those commands fail rather than silently running unconfined; set `warn_missing_bwrap = false` to silence the warning.
 
 **Root is not required.** bubblewrap is designed for unprivileged use: no setuid, no capabilities. Any host with unprivileged user namespaces enabled (the default on Debian, Ubuntu, Arch, Fedora — check `/proc/sys/user/max_user_namespaces`) needs nothing beyond `bwrap` on the server's `PATH`.
 
@@ -142,7 +163,7 @@ All stdout/stderr frames precede the exit frame, which is terminal.
 cargo test
 ```
 
-Covers basic relay, stdin forwarding, binary round-trips, exit codes, stderr separation, hyphenated args, 1 MB output, 10 concurrent clients, glob rules, and symlink invocation.
+Covers basic relay, stdin forwarding, binary round-trips, exit codes, stderr separation, hyphenated args, 1 MB output, 10 concurrent clients, glob rules, symlink invocation, sandbox defaults, frame/handshake size limits, and survival under a connection flood.
 
 ### Docker smoke test
 
@@ -156,4 +177,4 @@ docker compose -f docker/compose.yml down -v
 
 The client drives symlinked commands (`foo`, `relaycat`, `safecat`, `bar`) and asserts the access rules hold, including that sandboxed `safecat` reads its bound directory but not `/etc/passwd`. Exits 0 when every check passes.
 
-The server container gets `security_opt: [seccomp=unconfined]` — *not* `privileged` — the minimal grant that lets bubblewrap create namespaces inside Docker. `safecat` also sets `proc = false`, since Docker's masked `/proc` blocks mounting a fresh procfs unprivileged. Neither is needed on a normal host.
+The server container gets `security_opt: [seccomp=unconfined]` — *not* `privileged` — the minimal grant that lets bubblewrap create namespaces inside Docker. The demo commands also set `proc = false`, since Docker's masked `/proc` blocks mounting a fresh procfs unprivileged. Neither is needed on a normal host.

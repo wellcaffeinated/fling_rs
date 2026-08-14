@@ -4,15 +4,29 @@
 # match one of the `allow` glob patterns. Patterns are matched against the
 # space-joined arguments; `*` matches any run of characters, `?` a single one.
 
+# Sandboxing is on by default: every command here is confined whether or not it
+# declares a [*.sandbox] section. The sections below exist only to set
+# `proc`/`dev` false, which Docker's masked /proc requires — on a normal host
+# these commands would need no sandbox section at all.
+
 # `foo list ...` and `foo status` are permitted; `foo create ...` is not.
 [commands.foo]
 executable = "/bin/echo"
 allow = ["list*", "status"]
 
-# `relaycat` forwards stdin to cat, with any arguments allowed.
+[commands.foo.sandbox]
+proc = false
+dev = false
+
+# `relaycat` forwards stdin to cat, with any arguments allowed. Confined by
+# default, so it can read nothing from the host — stdin still relays fine.
 [commands.relaycat]
 executable = "/bin/cat"
 allow = ["*"]
+
+[commands.relaycat.sandbox]
+proc = false
+dev = false
 
 # `safecat` relays cat inside a bubblewrap sandbox that exposes ONLY
 # /data/public. Even though any path argument is allowed by the glob rule,

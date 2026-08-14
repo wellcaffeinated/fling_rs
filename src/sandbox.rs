@@ -7,6 +7,8 @@
 //! relayed `cat` can be restricted to a single directory: bind that directory
 //! read-only and nothing else (so `/etc/passwd` simply isn't present).
 
+use std::path::Path;
+
 use tokio::process::Command;
 
 use crate::config::{CommandConfig, Sandbox};
@@ -15,6 +17,17 @@ use crate::config::{CommandConfig, Sandbox};
 /// shared libraries resolve. `--ro-bind-try` skips any that don't exist on the
 /// host (e.g. `/lib64` on some distros).
 const RUNTIME_DIRS: &[&str] = &["/lib", "/lib64", "/bin", "/sbin"];
+
+/// Working directory for a sandboxed command that doesn't configure one: an
+/// empty directory created inside the sandbox, so relative paths resolve
+/// against nothing. It lives on the sandbox's own tmpfs and is discarded with
+/// the process. The name is deliberately unlikely to collide with a bind.
+const DEFAULT_SANDBOX_CWD: &str = "/fling-cwd";
+
+/// Working directory for a command that has opted out of sandboxing and set no
+/// `working_dir`. Relayed commands must never inherit the server's own working
+/// directory, which depends on how the admin happened to launch it.
+const DEFAULT_UNSANDBOXED_CWD: &str = "/";
 
 /// Build the [`Command`] to spawn for `entry` with `args`.
 ///
@@ -25,9 +38,9 @@ pub fn build_command(entry: &CommandConfig, args: &[String]) -> Command {
         None => {
             let mut cmd = Command::new(&entry.executable);
             cmd.args(args);
-            if let Some(wd) = &entry.working_dir {
-                cmd.current_dir(wd);
-            }
+            cmd.current_dir(
+                entry.working_dir.as_deref().unwrap_or(DEFAULT_UNSANDBOXED_CWD),
+            );
             cmd
         }
         Some(sandbox) => build_sandboxed(entry, sandbox, args),
@@ -66,8 +79,22 @@ fn build_sandboxed(entry: &CommandConfig, sandbox: &Sandbox, args: &[String]) ->
         cmd.args(["--bind", path, path]);
     }
 
-    if let Some(wd) = &entry.working_dir {
-        cmd.args(["--chdir", wd]);
+    match &entry.working_dir {
+        // Setting `working_dir` is the admin's explicit grant for that
+        // directory: bind it so it exists inside the sandbox, unless an
+        // existing bind already covers it (which would otherwise clobber a
+        // read-write grant with a read-only one).
+        Some(wd) => {
+            if !is_covered(wd, sandbox) {
+                cmd.args(["--ro-bind", wd, wd]);
+            }
+            cmd.args(["--chdir", wd]);
+        }
+        // No working directory configured: start in an empty one.
+        None => {
+            cmd.args(["--dir", DEFAULT_SANDBOX_CWD]);
+            cmd.args(["--chdir", DEFAULT_SANDBOX_CWD]);
+        }
     }
 
     // End of bwrap options; the relayed command follows.
@@ -75,6 +102,26 @@ fn build_sandboxed(entry: &CommandConfig, sandbox: &Sandbox, args: &[String]) ->
     cmd.arg(&entry.executable);
     cmd.args(args);
     cmd
+}
+
+/// True if `path` is already visible inside the sandbox through one of its
+/// configured binds, either exactly or as a descendant.
+fn is_covered(path: &str, sandbox: &Sandbox) -> bool {
+    let path = Path::new(path);
+    sandbox
+        .ro_bind
+        .iter()
+        .chain(&sandbox.rw_bind)
+        .any(|bound| path.starts_with(Path::new(bound)))
+}
+
+/// Whether `bwrap` can be found on `PATH`. Presence only — this doesn't verify
+/// that it can actually create namespaces here.
+pub fn bwrap_on_path() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join("bwrap").is_file())
 }
 
 #[cfg(test)]

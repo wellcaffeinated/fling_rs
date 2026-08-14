@@ -20,8 +20,8 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 |---|---|
 | `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
 | `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling/fling.sock`. |
-| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Read once at startup, wrapped in `Arc<Config>`. |
-| `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` when the command has a `[*.sandbox]` section. |
+| `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Resolves the `sandbox` key (absent → on; `false` → off; table → settings). Read once at startup, wrapped in `Arc<Config>`. |
+| `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` unless the command sets `sandbox = false`. Also `bwrap_on_path` for the startup warning. |
 | `src/protocol.rs` | Wire format: `read_frame`/`write_frame` for binary frames, `read_json_line`/`write_json_line` for the handshake. |
 | `src/server.rs` | Accept loop + per-connection handler. Each connection spawns 4 tasks (A: stdin relay, B: stdout, C: stderr, D: socket writer). |
 | `src/client.rs` | Connects, sends request, relays stdin (task), receives output frames (task). |
@@ -37,9 +37,19 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 ## Sandboxing
 
-- A command with a `[commands.<name>.sandbox]` section (`ro_bind`/`rw_bind` lists, plus `proc`/`dev` bools that default true) is spawned via `bwrap` — see `src/sandbox.rs`. Only `/usr`, runtime lib dirs, `/tmp`, optionally `/proc`+`/dev`, and the bound paths are visible; namespaces (incl. network) are unshared.
+- **On by default.** Every command is spawned via `bwrap` unless it sets `sandbox = false`; a `[commands.<name>.sandbox]` section (`ro_bind`/`rw_bind` lists, plus `proc`/`dev` bools that default true) only configures it. See `src/sandbox.rs`. Only `/usr`, runtime lib dirs, `/tmp`, optionally `/proc`+`/dev`, and the bound paths are visible; namespaces (incl. network) are unshared.
+- **CWD is never inherited.** With no `working_dir`, a sandboxed command starts in `/fling-cwd` — an empty dir created inside the sandbox — and an unsandboxed one starts in `/`. Setting `working_dir` implicitly ro-binds that path into the sandbox (skipped if an existing bind already covers it, so an `rw_bind` isn't clobbered).
+- If `bwrap` isn't on `PATH` while any command is sandboxed, the server prints a loud startup warning (silence with top-level `warn_missing_bwrap = false`). Sandboxed commands then fail at spawn — they never fall back to running unconfined.
 - This is how a relayed `cat` is confined to a directory: the unbound files don't exist in the sandbox, independent of the glob rules.
 - **No root needed**: bwrap sandboxes unprivileged on any host with unprivileged user namespaces enabled (the distro default). The fiddly cases are nesting inside another restricted sandbox: Docker's default seccomp blocks the `CLONE_NEWUSER` syscalls and its masked `/proc` blocks a fresh procfs mount. Hence the smoke test uses `security_opt: [seccomp=unconfined]` (not `privileged`) and `proc = false` on the demo command — both only needed because of the outer Docker container.
+
+## Resource limits
+
+All four are defensive defaults against a hostile client; none are configurable:
+
+- `protocol.rs`: `MAX_FRAME_PAYLOAD` and `MAX_HANDSHAKE_BYTES` (1 MiB each) bound allocations driven by peer-controlled lengths. Peers chunk at 8 KiB.
+- `server.rs`: `HANDSHAKE_TIMEOUT` (10s) drops connections that never speak; `MAX_CONNECTIONS` (128, a `Semaphore`) bounds concurrent connections and hence child processes.
+- The accept loop **must not** propagate errors — fd exhaustion has to stay transient. Log, back off `ACCEPT_BACKOFF`, continue.
 
 ## Protocol invariants
 

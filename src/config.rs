@@ -8,6 +8,15 @@ use serde::Deserialize;
 #[derive(Clone)]
 pub struct Config {
     pub commands: HashMap<String, CommandConfig>,
+    /// Warn at startup when `bwrap` isn't on `PATH` but commands are sandboxed.
+    pub warn_missing_bwrap: bool,
+}
+
+impl Config {
+    /// True if any command will be launched through `bwrap`.
+    pub fn uses_sandbox(&self) -> bool {
+        self.commands.values().any(|c| c.sandbox.is_some())
+    }
 }
 
 /// A single relayable command with its compiled access rules.
@@ -42,6 +51,19 @@ pub struct Sandbox {
 
 fn default_true() -> bool {
     true
+}
+
+impl Default for Sandbox {
+    /// The implicit sandbox for a command that doesn't configure one: no host
+    /// paths granted at all.
+    fn default() -> Self {
+        Sandbox {
+            ro_bind: Vec::new(),
+            rw_bind: Vec::new(),
+            proc: true,
+            dev: true,
+        }
+    }
 }
 
 impl CommandConfig {
@@ -86,6 +108,8 @@ impl Config {
 
 #[derive(Deserialize)]
 struct RawConfig {
+    #[serde(default = "default_true")]
+    warn_missing_bwrap: bool,
     commands: HashMap<String, RawCommand>,
 }
 
@@ -97,7 +121,26 @@ struct RawCommand {
     /// an empty list, which denies every invocation (default-deny).
     #[serde(default)]
     allow: Vec<String>,
-    sandbox: Option<Sandbox>,
+    sandbox: Option<RawSandbox>,
+}
+
+/// The `sandbox` key accepts either a table of settings or `false` to opt out.
+/// Absent means sandboxed with defaults — confinement is not opt-in.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawSandbox {
+    Toggle(bool),
+    Settings(Box<Sandbox>),
+}
+
+impl RawSandbox {
+    fn resolve(value: Option<RawSandbox>) -> Option<Sandbox> {
+        match value {
+            None | Some(RawSandbox::Toggle(true)) => Some(Sandbox::default()),
+            Some(RawSandbox::Toggle(false)) => None,
+            Some(RawSandbox::Settings(s)) => Some(*s),
+        }
+    }
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -129,12 +172,12 @@ fn parse(content: &str) -> Result<Config> {
                 executable: rc.executable,
                 working_dir: rc.working_dir,
                 allow,
-                sandbox: rc.sandbox,
+                sandbox: RawSandbox::resolve(rc.sandbox),
             },
         );
     }
 
-    Ok(Config { commands })
+    Ok(Config { commands, warn_missing_bwrap: raw.warn_missing_bwrap })
 }
 
 /// Parse config text, panicking on error. For use by tests in sibling modules.
