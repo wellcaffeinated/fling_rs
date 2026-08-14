@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/wellcaffeinated/fling_rs/compare/v0.1.0...v0.1.1) - 2026-08-14
+
+### Other
+
+- Document glob gotchas
+- Default sandboxed CWD to /tmp instead of a synthetic dir
+- Confine commands and pin the working directory by default
+- Assert intended sandbox defaults in unit tests
+- Keep connection pressure from killing the server
+- Bound allocations driven by untrusted peer input
+- Rewrite README: surface defaults, generic examples, release install
+- make /proc and /dev optional; drop privileged from smoke test
+- Default socket to /run/fling/fling.sock
+- Use globset, uniform denial message, bwrap sandboxing; fix output flush
+- Add symlink-name relay and default-deny glob access rules
+
 ## [0.1.0](https://github.com/wellcaffeinated/fling_rs/releases/tag/v0.1.0) - 2026-05-27
 
 ### Other
