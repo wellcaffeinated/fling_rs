@@ -14,6 +14,20 @@ struct TestServer {
     pub socket: String,
 }
 
+/// Overrides for how the server process itself is launched.
+#[derive(Default)]
+struct ServerOpts {
+    /// Socket path, when the default `/tmp/fling-test-{id}.sock` won't do.
+    socket: Option<String>,
+    /// Working directory of the *server* process, which relayed commands
+    /// currently inherit.
+    cwd: Option<String>,
+    /// Environment overrides (e.g. emptying PATH to hide `bwrap`).
+    env: Vec<(String, String)>,
+    /// Cap the server's open file descriptors, to reach exhaustion cheaply.
+    fd_limit: Option<u32>,
+}
+
 impl TestServer {
     /// Start a server allowing every argument for each command (`allow = ["*"]`).
     fn start(id: &str, commands: &[(&str, &str)]) -> Self {
@@ -26,9 +40,6 @@ impl TestServer {
 
     /// Start a server with explicit allow globs per command.
     fn start_with_rules(id: &str, commands: &[(&str, &str, &[&str])]) -> Self {
-        let socket = format!("/tmp/fling-test-{id}.sock");
-        let config_path = format!("/tmp/fling-test-{id}.toml");
-
         let mut config = String::new();
         for (name, exe, allow) in commands {
             let patterns = allow
@@ -40,14 +51,44 @@ impl TestServer {
                 "[commands.{name}]\nexecutable = \"{exe}\"\nallow = [{patterns}]\n\n"
             ));
         }
+        Self::start_with_config(id, &config, ServerOpts::default())
+    }
+
+    /// Start a server from verbatim config text, for shapes the helpers above
+    /// can't express (sandbox tables, `sandbox = false`, top-level settings).
+    fn start_with_config(id: &str, config: &str, opts: ServerOpts) -> Self {
+        let socket = opts
+            .socket
+            .clone()
+            .unwrap_or_else(|| format!("/tmp/fling-test-{id}.sock"));
+        let config_path = format!("/tmp/fling-test-{id}.toml");
+
         std::fs::write(&config_path, config).unwrap();
         let _ = std::fs::remove_file(&socket);
 
-        let process = Command::new(FLING)
-            .args(["server", "--socket", &socket, "--config", &config_path])
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        // `ulimit` is a shell builtin, so an fd cap means going through sh.
+        let mut command = match opts.fd_limit {
+            None => {
+                let mut c = Command::new(FLING);
+                c.args(["server", "--socket", &socket, "--config", &config_path]);
+                c
+            }
+            Some(limit) => {
+                let mut c = Command::new("sh");
+                c.arg("-c").arg(format!(
+                    "ulimit -n {limit}; exec {FLING} server --socket {socket} --config {config_path}"
+                ));
+                c
+            }
+        };
+        command.stderr(Stdio::null());
+        if let Some(cwd) = &opts.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &opts.env {
+            command.env(key, value);
+        }
+        let process = command.spawn().unwrap();
 
         // Wait up to 2s for the server to be accepting connections.
         // Checking file existence alone isn't enough under parallel test load;
@@ -63,6 +104,11 @@ impl TestServer {
         assert!(ready, "server never became ready for test '{id}'");
 
         TestServer { process, socket }
+    }
+
+    /// True while the server process is still running.
+    fn is_alive(&mut self) -> bool {
+        matches!(self.process.try_wait(), Ok(None))
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
@@ -292,4 +338,209 @@ fn empty_stdin() {
     let out = s.run_with_stdin(&["cat"], b"");
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Defaults: confinement is on unless explicitly disabled
+// ---------------------------------------------------------------------------
+
+/// Creates an empty scratch directory containing `marker.txt`, returning its
+/// path. Used to prove what a relayed command can and cannot reach.
+fn scratch_with_marker(id: &str) -> String {
+    let dir = format!("/tmp/fling-test-{id}.d");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(format!("{dir}/marker.txt"), "marker contents\n").unwrap();
+    dir
+}
+
+#[test]
+fn command_without_sandbox_section_cannot_read_host_files() {
+    // The headline default: no `[*.sandbox]` section must still mean confined.
+    // `allow = ["*"]` permits the argument; the filesystem must not.
+    let config = r#"
+        [commands.cat]
+        executable = "/bin/cat"
+        allow = ["*"]
+    "#;
+    let s = TestServer::start_with_config("default-confined", config, ServerOpts::default());
+
+    let out = s.run(&["cat", "/etc/passwd"]);
+    assert!(
+        !out.status.success(),
+        "unsandboxed-by-default command read /etc/passwd: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("root:"),
+        "leaked /etc/passwd contents"
+    );
+}
+
+#[test]
+fn default_working_dir_reaches_nothing() {
+    // With no `working_dir`, a relayed command must not inherit the server's
+    // CWD — relative paths should resolve into an empty directory.
+    let dir = scratch_with_marker("default-cwd");
+    let config = r#"
+        [commands.cat]
+        executable = "/bin/cat"
+        allow = ["*"]
+    "#;
+    let s = TestServer::start_with_config(
+        "default-cwd",
+        config,
+        ServerOpts { cwd: Some(dir.clone()), ..Default::default() },
+    );
+
+    let out = s.run(&["cat", "marker.txt"]);
+    assert!(
+        !out.status.success(),
+        "relayed command inherited the server's CWD and read {dir}/marker.txt"
+    );
+}
+
+#[test]
+fn missing_bwrap_fails_closed() {
+    // If `bwrap` can't be found, a sandboxed command must fail — never fall
+    // back to running unconfined.
+    let config = r#"
+        [commands.cat]
+        executable = "/bin/cat"
+        allow = ["*"]
+
+        [commands.cat.sandbox]
+        ro_bind = []
+    "#;
+    let s = TestServer::start_with_config(
+        "no-bwrap",
+        config,
+        ServerOpts {
+            env: vec![("PATH".to_string(), String::new())],
+            ..Default::default()
+        },
+    );
+
+    let out = s.run(&["cat", "/etc/passwd"]);
+    assert!(!out.status.success(), "sandboxed command ran without bwrap");
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("root:"),
+        "fell back to running unconfined"
+    );
+}
+
+#[test]
+fn sandbox_false_disables_confinement() {
+    // The documented escape hatch has to actually work.
+    let config = r#"
+        [commands.cat]
+        executable = "/bin/cat"
+        allow = ["*"]
+        sandbox = false
+    "#;
+    let s = TestServer::start_with_config("sandbox-off", config, ServerOpts::default());
+
+    let out = s.run(&["cat", "/etc/passwd"]);
+    assert!(
+        out.status.success(),
+        "sandbox = false should run unconfined: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("root:"));
+}
+
+#[test]
+fn working_dir_grants_access_to_itself() {
+    // Setting `working_dir` is the admin's explicit grant: the directory must
+    // be readable from inside the sandbox, and become the CWD.
+    let dir = scratch_with_marker("wd-grant");
+    // The sandbox section is explicit so this exercises the bind path even
+    // before sandboxing becomes the default; note it grants no paths itself —
+    // `working_dir` alone must be enough.
+    let config = format!(
+        r#"
+        [commands.cat]
+        executable = "/bin/cat"
+        allow = ["*"]
+        working_dir = "{dir}"
+
+        [commands.cat.sandbox]
+        ro_bind = []
+        "#
+    );
+    let s = TestServer::start_with_config("wd-grant", &config, ServerOpts::default());
+
+    let out = s.run(&["cat", "marker.txt"]);
+    assert!(
+        out.status.success(),
+        "working_dir should be bound into the sandbox: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "marker contents\n");
+}
+
+#[test]
+fn survives_connection_flood() {
+    // Exhausting the server's file descriptors must be transient: accept()
+    // failures are not a reason to take the whole relay down. The fd cap only
+    // makes exhaustion cheap to reach — under systemd's default LimitNOFILE
+    // this is ~1024 idle connections from any local user.
+    let config = r#"
+        [commands.echo]
+        executable = "/bin/echo"
+        allow = ["*"]
+    "#;
+    let mut s = TestServer::start_with_config(
+        "flood",
+        config,
+        ServerOpts { fd_limit: Some(64), ..Default::default() },
+    );
+
+    // Hold connections open without ever completing a handshake.
+    let mut held = Vec::new();
+    for _ in 0..200 {
+        match std::os::unix::net::UnixStream::connect(&s.socket) {
+            Ok(c) => held.push(c),
+            Err(_) => break, // server refusing new connections is fine
+        }
+    }
+    thread::sleep(Duration::from_millis(300));
+    assert!(s.is_alive(), "server died under a connection flood");
+
+    // Once the flood lets go, service must resume.
+    drop(held);
+    thread::sleep(Duration::from_millis(300));
+    let out = s.run(&["echo", "recovered"]);
+    assert!(
+        out.status.success(),
+        "server stopped serving after the flood: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "recovered\n");
+}
+
+#[test]
+fn socket_parent_directory_is_created() {
+    // The default socket lives in /run/fling/, a directory that won't exist on
+    // a fresh install; the server should create it rather than fail to bind.
+    let base = "/tmp/fling-test-sockdir.d";
+    let _ = std::fs::remove_dir_all(base);
+    let socket = format!("{base}/nested/fling.sock");
+
+    let config = r#"
+        [commands.echo]
+        executable = "/bin/echo"
+        allow = ["*"]
+    "#;
+    let s = TestServer::start_with_config(
+        "sockdir",
+        config,
+        ServerOpts { socket: Some(socket.clone()), ..Default::default() },
+    );
+
+    let out = s.run(&["echo", "hi"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "hi\n");
+
+    let _ = std::fs::remove_dir_all(base);
 }

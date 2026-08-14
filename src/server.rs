@@ -1,36 +1,81 @@
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::Config;
 use crate::protocol::{self, ServerAck, CH_ERROR, CH_EXIT, CH_STDIN, CH_STDIN_EOF, CH_STDERR, CH_STDOUT};
+
+/// How long a connection may sit without completing its handshake. Without a
+/// bound, connections opened and never written to are held indefinitely, and
+/// enough of them exhaust the server's file descriptors.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Maximum connections served at once. Each one costs a socket, four tasks and
+/// (once authorized) a child process, so this bounds the resources any set of
+/// clients can tie up.
+const MAX_CONNECTIONS: usize = 128;
+
+/// Pause after a failed `accept`, so a persistent failure (typically file
+/// descriptor exhaustion) doesn't spin the accept loop at full speed.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 pub async fn run(socket_path: &str, config: Config) -> Result<()> {
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
     let config = Arc::new(config);
+    let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     eprintln!("fling: listening on {socket_path}");
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        // Acquiring first bounds how many connections we hold at once: past the
+        // limit we simply stop accepting, and the kernel queues or refuses on
+        // our behalf. This also bounds concurrent child processes.
+        let permit = connections
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("connection semaphore is never closed");
+
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Accept failures are transient — running out of file
+                // descriptors must not take the whole relay down. Back off
+                // briefly so a persistent error doesn't spin the loop.
+                eprintln!("fling: accept failed: {e}");
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
+                continue;
+            }
+        };
+
         let config = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, config).await {
+            let _permit = permit; // released when the connection finishes
+            if let Err(e) = handle_connection(stream, config, HANDSHAKE_TIMEOUT).await {
                 eprintln!("fling: connection error: {e}");
             }
         });
     }
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, config: Arc<Config>) -> Result<()> {
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    config: Arc<Config>,
+    handshake_timeout: Duration,
+) -> Result<()> {
     let (mut read_half, mut write_half) = stream.into_split();
 
-    // Handshake: read request
-    let request: protocol::ClientRequest = protocol::read_json_line(&mut read_half).await?;
+    // Handshake: read request. Bounded in time so a connection that never
+    // speaks is dropped instead of held open.
+    let request: protocol::ClientRequest =
+        tokio::time::timeout(handshake_timeout, protocol::read_json_line(&mut read_half))
+            .await
+            .map_err(|_| anyhow!("handshake timed out after {handshake_timeout:?}"))??;
 
     // Authorize under the default-deny access rules (command must be configured
     // and its arguments must match an allow glob). The detailed reason is logged
@@ -164,4 +209,66 @@ async fn handle_connection(stream: tokio::net::UnixStream, config: Arc<Config>) 
     write_half.flush().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Arc<Config> {
+        Arc::new(crate::config::parse_for_test(
+            r#"
+            [commands.echo]
+            executable = "/bin/echo"
+            allow = ["*"]
+            "#,
+        ))
+    }
+
+    #[tokio::test]
+    async fn idle_connection_is_dropped_after_handshake_timeout() {
+        // A client that connects and never speaks must not hold the connection
+        // open indefinitely — that's what makes fd exhaustion cheap.
+        let (server_side, mut client_side) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(handle_connection(
+            server_side,
+            test_config(),
+            Duration::from_millis(50),
+        ));
+
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), client_side.read(&mut buf)).await;
+
+        let n = read
+            .expect("server held an idle connection past the handshake timeout")
+            .unwrap();
+        assert_eq!(n, 0, "expected the server to close the connection");
+    }
+
+    #[tokio::test]
+    async fn handshake_within_timeout_is_served() {
+        // The timeout must not disturb a client that does speak up.
+        let (server_side, mut client_side) = tokio::net::UnixStream::pair().unwrap();
+        tokio::spawn(handle_connection(
+            server_side,
+            test_config(),
+            Duration::from_secs(5),
+        ));
+
+        client_side
+            .write_all(b"{\"cmd\":\"echo\",\"args\":[\"hi\"]}\n")
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_secs(5), client_side.read(&mut buf))
+            .await
+            .expect("server never acknowledged the handshake")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("\"ok\":true"),
+            "expected an ack, got: {}",
+            String::from_utf8_lossy(&buf[..n])
+        );
+    }
 }
