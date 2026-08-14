@@ -96,11 +96,24 @@ mod tests {
     }
 
     #[test]
-    fn no_sandbox_runs_executable_directly() {
+    fn sandbox_is_on_by_default() {
+        // A command with no `[*.sandbox]` section must still be confined.
         let toml = r#"
             [commands.echo]
             executable = "/bin/echo"
             allow = ["*"]
+        "#;
+        let argv = cmd_for(toml, "echo", &["hi"]);
+        assert_eq!(argv[0], "bwrap", "commands must be sandboxed unless opted out");
+    }
+
+    #[test]
+    fn sandbox_false_runs_executable_directly() {
+        let toml = r#"
+            [commands.echo]
+            executable = "/bin/echo"
+            allow = ["*"]
+            sandbox = false
         "#;
         let argv = cmd_for(toml, "echo", &["hi"]);
         assert_eq!(argv, vec!["/bin/echo", "hi"]);
