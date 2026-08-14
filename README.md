@@ -104,6 +104,33 @@ You are not authorized to execute this command
 
 The client prints exactly that and exits 1. The server logs the specific reason to its own stderr.
 
+#### Gotchas
+
+Patterns are matched as **plain text** against the arguments joined by single spaces. There is no path logic, no shell, and no notion of "one argument". That leads to a few surprises:
+
+| You write | You might expect | What actually happens |
+|---|---|---|
+| `allow = ["/srv/data/*"]` | only files under `/srv/data` | also matches `/srv/data/../../etc/passwd` — it's text, not a path. **Use the sandbox for real containment.** |
+| `allow = ["list*"]` | `list`, maybe one flag | any trailing text: `list --all --force …`. `*` spans spaces *and* `/` |
+| `allow = ["list *"]` | `list` works | bare `list` is **denied** — the pattern demands that space |
+| `allow = ["status"]` | `status` plus flags | only exactly `status`; `status --force` is denied |
+| `allow = ["--filter [a-z]"]` | the literal text `[a-z]` | matches `--filter a` — brackets are a character class |
+| `allow = ["/data/**"]` | deeper than `*` | identical to `/data/*`; `*` already crosses `/` |
+| `allow = ["run"]` | covers bare `run` | zero arguments join to `""`, so bare `run` needs `allow = [""]` |
+
+Three more, briefly:
+
+- **Matching is case-sensitive.** `STATUS` does not match `status`.
+- **There are no deny rules.** You can't allow `list*` *except* `list --secrets`; if a pattern matches, it's permitted.
+- **A typo takes the server down.** Patterns compile at startup, so one malformed glob anywhere is a startup failure, not a per-command problem.
+
+To match a literal `[`, `?`, `*` or `{`, escape it *and* use a TOML literal (single-quoted) string, or TOML will eat the backslash first:
+
+```toml
+allow = ['--filter \[a-z\]']    # correct: literal brackets
+allow = ["--filter \[a-z\]"]    # wrong: TOML consumes the backslash
+```
+
 ### Sandboxing
 
 **Every command is confined by default.** Commands run through [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`) in fresh mount/pid/user/network namespaces containing `/usr`, the runtime library directories, a fresh `/tmp`, `/proc` and `/dev` — and nothing else. A command with no `sandbox` section can read no host files at all, and starts in the sandbox's own `/tmp` — a fresh tmpfs, empty and writable, discarded when the command exits — so relative paths reach nothing on the host either. (A command with `sandbox = false` starts in `/` instead, since there the host's shared `/tmp` would be a poor default.)
