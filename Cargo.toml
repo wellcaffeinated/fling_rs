@@ -1,6 +1,6 @@
 [package]
 name = "fling"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # `publish` is deliberately left at its default. Setting `publish = false` here
 # makes release-plz skip the package entirely — no git tag, no release. Cargo
