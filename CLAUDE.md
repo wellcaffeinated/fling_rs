@@ -18,7 +18,7 @@ If `cargo fetch` hasn't been run yet, do that first — crates.io downloads can 
 
 | File | Role |
 |---|---|
-| `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server`, prepend `client`. |
+| `src/main.rs` | Entry point. Two dispatch checks before clap: (1) symlink mode — if `argv[0]`'s basename isn't `fling`, that name is the command to relay and all args are forwarded; socket comes from `$FLING_SOCKET`. (2) implicit client mode — if `argv[1]` isn't `server` (or one of `TOP_LEVEL_FLAGS`, the `--version`/`-V` pair clap answers itself), prepend `client`. The flag exemption is first-position only, so a relayed command's own `--version` still forwards. |
 | `src/cli.rs` | clap structs. `Client` subcommand is internal; users omit it. `--socket` reads `$FLING_SOCKET` and defaults to `unix:/run/fling/fling.sock`. |
 | `src/config.rs` | TOML config loading + `Config::authorize` (default-deny). Allow globs are compiled to a `globset::GlobSet` per command at load (fail-fast on bad patterns). Resolves the `sandbox` key (absent → on; `false` → off; table → settings). Read once at startup, wrapped in `Arc<Config>`. |
 | `src/sandbox.rs` | `build_command` — returns the `tokio::process::Command` to spawn, wrapping it in `bwrap` unless the command sets `sandbox = false`. Also `bwrap_on_path` for the startup warning. |

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "fling", about = "Unix socket command relay")]
+#[command(name = "fling", version, about = "Unix socket command relay")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

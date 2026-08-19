@@ -271,6 +271,60 @@ fn args_with_hyphens_and_spaces() {
 }
 
 #[test]
+fn version_flag_reports_crate_version() {
+    // `--version`/`-V` are answered by fling itself rather than being swallowed
+    // by the implicit-client rewrite (which would parse them as a command name).
+    for flag in ["--version", "-V"] {
+        let out = Command::new(FLING).arg(flag).output().unwrap();
+        assert!(out.status.success(), "{flag} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap().trim(),
+            format!("fling {}", env!("CARGO_PKG_VERSION")),
+        );
+    }
+}
+
+#[test]
+fn version_flags_after_a_command_are_relayed() {
+    // Only the *first* argument is fling's own flag. Once a command name is
+    // present these belong to the relayed command and must be forwarded
+    // verbatim — `echo` never treats `-V` or a non-leading `--version` specially.
+    let s = TestServer::start("version-relay", &[("greet", "/bin/echo")]);
+
+    let out = s.run(&["greet", "-V"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "-V\n");
+
+    let out = s.run(&["greet", "hello", "--version", "world"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "hello --version world\n");
+}
+
+#[test]
+fn symlink_invocation_relays_version_flag() {
+    // Symlink mode forwards every argument, so a `--version` there belongs to
+    // the relayed command and never reaches fling's own parser.
+    let s = TestServer::start_with_rules("symlink-version", &[("greet", "/bin/echo", &["*"])]);
+
+    let link_dir = "/tmp/fling-test-symlink-version-bin".to_string();
+    let _ = std::fs::remove_dir_all(&link_dir);
+    std::fs::create_dir_all(&link_dir).unwrap();
+    let link = format!("{link_dir}/greet");
+    std::os::unix::fs::symlink(FLING, &link).unwrap();
+
+    let out = Command::new(&link)
+        .arg("-V")
+        .env("FLING_SOCKET", format!("unix:{}", s.socket))
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "-V\n");
+
+    let _ = std::fs::remove_dir_all(&link_dir);
+}
+
+#[test]
 fn large_output_byte_perfect() {
     let s = TestServer::start("large-output", &[("cat", "/bin/cat")]);
     let data: Vec<u8> = (0u8..=255).cycle().take(1_000_000).collect();

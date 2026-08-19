@@ -19,6 +19,12 @@ const PROGRAM_NAME: &str = "fling";
 /// `FLING_SOCKET` environment variable.
 const DEFAULT_SOCKET: &str = "unix:/run/fling/fling.sock";
 
+/// Flags clap must answer itself instead of them being swallowed by the implicit
+/// client rewrite. Only recognised as the *first* argument: anywhere after a
+/// command name they belong to the relayed command (`fling obsidian --version`)
+/// and are forwarded verbatim.
+const TOP_LEVEL_FLAGS: [&str; 2] = ["--version", "-V"];
+
 fn parse_socket_path(s: &str) -> String {
     s.strip_prefix("unix:").unwrap_or(s).to_owned()
 }
@@ -50,10 +56,10 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    // Implicit client mode: if the first argument isn't "server", prepend
-    // "client" so clap always sees an explicit subcommand.
+    // Implicit client mode: if the first argument isn't "server" (or a flag clap
+    // owns), prepend "client" so clap always sees an explicit subcommand.
     let mut args = args;
-    if args.len() > 1 && args[1] != "server" {
+    if args.len() > 1 && args[1] != "server" && !TOP_LEVEL_FLAGS.contains(&args[1].as_str()) {
         args.insert(1, "client".to_string());
     }
 
