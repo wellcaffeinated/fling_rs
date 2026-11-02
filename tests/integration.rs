@@ -598,3 +598,109 @@ fn socket_parent_directory_is_created() {
 
     let _ = std::fs::remove_dir_all(base);
 }
+
+// ---------------------------------------------------------------------------
+// Cancellation: a client that goes away must not leave its command running.
+// ---------------------------------------------------------------------------
+
+/// Number of live processes with `arg` as one of their arguments.
+fn processes_with_arg(arg: &str) -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return 0 };
+    entries
+        .filter_map(|e| std::fs::read(e.ok()?.path().join("cmdline")).ok())
+        .filter(|cmdline| cmdline.split(|&b| b == 0).any(|a| a == arg.as_bytes()))
+        .count()
+}
+
+/// Poll until no process carries `arg`, for up to 5s.
+fn wait_until_gone(arg: &str) -> bool {
+    for _ in 0..50 {
+        if processes_with_arg(arg) == 0 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Start `fling <args>` with the given stdin, wait for `marker` to appear in
+/// the process table, then kill the client.
+fn start_then_kill_client(s: &TestServer, args: &[&str], stdin: Stdio, marker: &str) {
+    let mut client = Command::new(FLING)
+        .arg("--socket")
+        .arg(&s.socket)
+        .args(args)
+        .stdin(stdin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut started = false;
+    for _ in 0..50 {
+        if processes_with_arg(marker) > 0 {
+            started = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    client.kill().unwrap();
+    client.wait().unwrap();
+    assert!(started, "relayed command never started");
+}
+
+#[test]
+fn killed_client_terminates_unsandboxed_command_and_its_children() {
+    // A silent command that ignores stdin gets no SIGPIPE and no EOF when the
+    // client dies; only the server's hangup watch stops it. The process-group
+    // kill must also reach what it forked.
+    let config = r#"
+        [commands.sh]
+        executable = "/bin/sh"
+        allow = ["*"]
+        sandbox = false
+
+        [commands.echo]
+        executable = "/bin/echo"
+        allow = ["*"]
+    "#;
+    let s = TestServer::start_with_config("cancel-unsandboxed", config, ServerOpts::default());
+
+    // stdin held open, as from a terminal, so no CH_STDIN_EOF is ever sent.
+    start_then_kill_client(
+        &s,
+        &["sh", "-c", "sleep 3001.11 & sleep 3001.12"],
+        Stdio::piped(),
+        "3001.12",
+    );
+    assert!(wait_until_gone("3001.12"), "command outlived its client");
+    assert!(wait_until_gone("3001.11"), "forked grandchild outlived the client");
+
+    // The connection permit was released, so the server still serves.
+    let out = s.run(&["echo", "still serving"]);
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "still serving\n");
+}
+
+#[test]
+fn killed_client_terminates_sandboxed_command() {
+    // With stdin already closed (CH_STDIN_EOF sent, write half shut down) the
+    // server must still tell a dead client from a merely half-closed one.
+    let s = TestServer::start("cancel-sandboxed", &[("sleep", "/bin/sleep")]);
+    start_then_kill_client(&s, &["sleep", "3002.21"], Stdio::null(), "3002.21");
+    assert!(wait_until_gone("3002.21"), "sandboxed command outlived its client");
+}
+
+#[test]
+fn closed_stdin_does_not_cancel_command() {
+    // The other side of the hangup check: a client whose stdin ends only
+    // half-closes the socket and is still waiting for output.
+    let config = r#"
+        [commands.sh]
+        executable = "/bin/sh"
+        allow = ["*"]
+        sandbox = false
+    "#;
+    let s = TestServer::start_with_config("halfclose", config, ServerOpts::default());
+    let out = s.run_with_stdin(&["sh", "-c", "sleep 1; echo survived"], b"");
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "survived\n");
+}
