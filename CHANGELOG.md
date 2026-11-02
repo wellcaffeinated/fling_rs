@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/wellcaffeinated/fling_rs/compare/v0.2.1...v0.2.2) - 2026-11-02
+
+### Fixed
+
+- terminate relayed commands when the client disconnects
+
 ## [0.2.1](https://github.com/wellcaffeinated/fling_rs/compare/v0.2.0...v0.2.1) - 2026-08-19
 
 ### Fixed
