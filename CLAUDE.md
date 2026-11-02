@@ -68,6 +68,8 @@ child stderr   → Task C → mpsc tx_c ─┴→ Task D (writer) → socket Wri
 
 Tasks B and C drop their `tx` clones when done; Task D exits when the channel drains. After `join!(B, C, D)`, the server aborts Task A and sends the Exit frame directly.
 
+**Cancellation**: that join is raced against `client_hung_up`, which watches a dup of the socket fd. If the client goes away first, `terminate` SIGTERMs the child's process group (children run with `process_group(0)`), SIGKILLs after `TERMINATE_GRACE` (2s), and aborts the relay tasks. Only a *full* close counts (`EPOLLHUP` → tokio `is_write_closed`): a client whose stdin ended has half-closed the socket and is still waiting for output, so socket EOF alone must never cancel. Sandboxed commands never see the SIGTERM — bwrap doesn't forward signals, so it dies and `--die-with-parent` SIGKILLs the command. `kill_on_drop(true)` is the backstop for early returns.
+
 ## Integration test design
 
 - Each test gets a unique socket path and config file (`/tmp/fling-test-{id}.*`).

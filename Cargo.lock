@@ -164,6 +164,7 @@ dependencies = [
  "anyhow",
  "clap",
  "globset",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

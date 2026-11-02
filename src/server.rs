@@ -1,11 +1,14 @@
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, Interest};
 use tokio::net::UnixListener;
+use tokio::process::Child;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::Config;
@@ -24,6 +27,10 @@ const MAX_CONNECTIONS: usize = 128;
 /// Pause after a failed `accept`, so a persistent failure (typically file
 /// descriptor exhaustion) doesn't spin the accept loop at full speed.
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
+/// How long a command whose client has hung up gets to exit after SIGTERM
+/// before its process group is sent SIGKILL.
+const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 
 pub async fn run(socket_path: &str, config: Config) -> Result<()> {
     if config.warn_missing_bwrap && config.uses_sandbox() && !crate::sandbox::bwrap_on_path() {
@@ -116,7 +123,17 @@ async fn handle_connection(
     let mut cmd = crate::sandbox::build_command(&entry, &request.args);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Own process group, so cancellation reaches anything the command
+        // forks, not just the direct child.
+        .process_group(0)
+        // Backstop: if this handler exits early (error, panic, task drop),
+        // don't leave the child running unsupervised.
+        .kill_on_drop(true);
+
+    // Watch for the client going away, on a duplicate of the socket fd so it
+    // runs independently of the stdin relay that owns the read half.
+    let hangup_fd = read_half.as_ref().as_fd().try_clone_to_owned()?;
 
     let program = cmd.as_std().get_program().to_string_lossy().into_owned();
     let mut child = match cmd.spawn() {
@@ -208,8 +225,30 @@ async fn handle_connection(
         write_half
     });
 
-    // Wait for stdout/stderr relay and writer to all finish
-    let (_, _, write_half_result) = tokio::join!(task_b, task_c, task_d);
+    let relay_tasks = [
+        task_a.abort_handle(),
+        task_b.abort_handle(),
+        task_c.abort_handle(),
+        task_d.abort_handle(),
+    ];
+
+    // Wait for stdout/stderr relay and writer to all finish — unless the
+    // client hangs up first. Nothing else would stop a command that is silent
+    // and ignores stdin: it would run on indefinitely, holding a connection
+    // permit, and enough of them lock every client out.
+    let relay = async { tokio::join!(task_b, task_c, task_d) };
+    let (_, _, write_half_result) = tokio::select! {
+        biased;
+        result = relay => result,
+        _ = client_hung_up(hangup_fd) => {
+            eprintln!("fling: client disconnected; terminating '{}'", request.cmd);
+            terminate(&mut child).await;
+            for task in &relay_tasks {
+                task.abort();
+            }
+            return Ok(());
+        }
+    };
     let mut write_half = write_half_result?;
 
     task_a.abort();
@@ -226,6 +265,57 @@ async fn handle_connection(
     write_half.flush().await?;
 
     Ok(())
+}
+
+/// Resolves once the client has fully closed its end of the connection.
+///
+/// A *half*-close is not a hangup: a client whose stdin ends sends
+/// `CH_STDIN_EOF` and then shuts down its write direction, which reads as EOF
+/// here while it is still waiting for output. Only a full close (the client
+/// exited or was killed) raises `EPOLLHUP`, which tokio reports as the write
+/// direction closing.
+async fn client_hung_up(fd: OwnedFd) {
+    let Ok(fd) = AsyncFd::with_interest(fd, Interest::WRITABLE) else {
+        // Can't watch, so never report a hangup — the pre-watch behaviour.
+        return std::future::pending().await;
+    };
+    loop {
+        let Ok(mut guard) = fd.writable().await else {
+            return std::future::pending().await;
+        };
+        if guard.ready().is_write_closed() {
+            return;
+        }
+        // Plain writability (the client drained some output); wait again.
+        guard.clear_ready();
+    }
+}
+
+/// Stop `child` and its process group: SIGTERM, then SIGKILL if it hasn't
+/// exited within [`TERMINATE_GRACE`].
+///
+/// A sandboxed command never sees the SIGTERM — bwrap doesn't forward signals,
+/// so it dies and `--die-with-parent` SIGKILLs the command inside.
+async fn terminate(child: &mut Child) {
+    signal_group(child, libc::SIGTERM);
+    if tokio::time::timeout(TERMINATE_GRACE, child.wait()).await.is_err() {
+        signal_group(child, libc::SIGKILL);
+        let _ = child.wait().await;
+    }
+}
+
+/// Send `signal` to the process group led by `child`.
+///
+/// Only while the child is unreaped (`id()` is `Some`): until then its pid —
+/// and so its group id — can't be recycled, so the signal can't land on an
+/// unrelated process group.
+fn signal_group(child: &Child, signal: libc::c_int) {
+    if let Some(pid) = child.id() {
+        // SAFETY: kill(2) takes no pointers; a negative pid names a group.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), signal);
+        }
+    }
 }
 
 #[cfg(test)]
